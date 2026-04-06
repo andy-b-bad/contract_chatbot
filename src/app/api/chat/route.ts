@@ -1,381 +1,479 @@
+import { createMCPClient } from "@ai-sdk/mcp";
+import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
   convertToModelMessages,
+  stepCountIs,
   streamText,
+  type ModelMessage,
   type UIMessage,
 } from "ai";
-import type {
-  LanguageModelV3,
-  LanguageModelV3CallOptions,
-  LanguageModelV3FinishReason,
-  LanguageModelV3GenerateResult,
-  LanguageModelV3Message,
-  LanguageModelV3StreamPart,
-  LanguageModelV3StreamResult,
-  LanguageModelV3Usage,
-} from "@ai-sdk/provider";
 
 export const runtime = "edge";
 
-const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
-const DEEPSEEK_MODEL = "deepseek-chat";
+const deepseek = createDeepSeek({
+  apiKey: process.env.DEEPSEEK_API_KEY,
+});
 
-type DeepSeekMessage = {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-};
+const ALLOWED_CHAT_TOOL_NAMES = [
+  "recent_documents",
+  "find_relevant_documents",
+  "get_document",
+  "get_document_structure",
+  "get_page_content",
+] as const;
 
-type DeepSeekChunk = {
-  id?: string;
-  created?: number;
-  model?: string;
-  choices?: Array<{
-    delta?: {
-      content?: string;
-    };
-    finish_reason?: string | null;
-  }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-  };
-};
+const SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
 
-function getApiKey() {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+You ONLY answer using the provided documents and previously retrieved document content in this conversation.
+You MUST NOT use general knowledge, assumptions, likely interpretations, industry norms, or outside facts.
+If the documents do not explicitly support the answer, you must refuse.
 
-  if (!apiKey) {
-    throw new Error("Missing DEEPSEEK_API_KEY");
+Decision order:
+1. If the user asks something clearly unrelated to the provided documents or asks for general world knowledge, reply with exactly:
+"I can only answer questions about the provided documents."
+2. If the question could be about a contract, policy, clause, payment term, notice period, leave, overtime, rate, entitlement, obligation, definition, formula, or other document topic, treat it as potentially in scope and check the documents before refusing.
+3. If the answer is already explicitly supported by previously retrieved document content in the conversation, answer directly from that content and do NOT call any tools.
+4. Otherwise, use the available retrieval tools to find the minimum evidence needed.
+5. If the first retrieval is insufficient, you may make at most one more targeted retrieval.
+6. If the answer is still not explicitly stated or directly calculable from retrieved wording, reply with exactly:
+"I cannot find this information in the provided documents."
+
+Grounding rules:
+- Retrieval-first: do not answer a document question before you have explicit supporting text.
+- Evidence-only: every factual statement in the answer must be traceable to retrieved document wording.
+- No guessing: do not infer missing meanings, fill gaps, or answer from common contract knowledge.
+- No paraphrase drift: if the document gives exact wording, quote or closely cite that wording instead of replacing it with a looser summary.
+- If the documents are ambiguous, partial, or silent on the exact point asked, refuse with the required fallback sentence.
+- If a value can be directly transformed from retrieved wording, perform only that minimal transformation and nothing more.
+
+Behaviour:
+- Respond in English.
+- Never describe what you are doing.
+- Never say things like "I will search", "let me check", or "I found".
+- Only output the final answer.
+- Keep answers concise, precise, and document-bound.
+- Follow the user's instructions exactly.
+- Reuse previously retrieved information whenever it is sufficient.
+- Do not perform additional searches if the answer can already be given from existing evidence.
+- As soon as you have enough evidence, stop and answer.
+
+Tool strategy:
+- For a simple factual document question, prefer the shortest path to the exact clause or wording.
+- After finding a relevant document, go straight to the relevant content if possible.
+- Do not call get_document_structure unless the question requires document organisation or you genuinely need structure to locate the answer.
+
+Answer style:
+- Give the answer in 1-3 sentences where possible.
+- When available, include the exact quoted wording or a brief clause/page reference.
+- Prefer exact wording over summary when the document text directly answers the question.
+- Do not broaden the answer beyond what the documents say.
+- Preserve requested formats exactly. If the user asks for a fraction, output only a plain ASCII fraction in a/b form rather than a percentage, decimal, or mixed numeral.
+- When re-expressing an already known value, transform the retrieved value directly instead of searching again.`;
+
+function extractToolText(result: unknown) {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "content" in result &&
+    Array.isArray(result.content)
+  ) {
+    return result.content
+      .filter(
+        (item): item is { type: string; text: string } =>
+          typeof item === "object" &&
+          item !== null &&
+          "type" in item &&
+          "text" in item &&
+          item.type === "text" &&
+          typeof item.text === "string",
+      )
+      .map((item) => item.text)
+      .join("\n");
   }
 
-  return apiKey;
+  return "";
 }
 
-function toDeepSeekMessages(prompt: LanguageModelV3Message[]): DeepSeekMessage[] {
-  return prompt.map((message) => {
-    if (message.role === "system") {
-      return {
-        role: "system",
-        content: message.content,
-      };
-    }
+function parseToolJson<T>(result: unknown): T | null {
+  const text = extractToolText(result);
 
-    const content = message.content
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+function truncateForTrace(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function safeJsonStringify(value: unknown) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getModelMessageText(message: ModelMessage) {
+  const content = message.content;
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
       .map((part) => {
-        switch (part.type) {
-          case "text":
-          case "reasoning":
-            return part.text;
-          case "tool-result":
-            return JSON.stringify(part.output);
-          default:
-            throw new Error(`Unsupported message part type: ${part.type}`);
+        if (typeof part === "string") {
+          return part;
         }
+
+        if (
+          typeof part === "object" &&
+          part !== null &&
+          "type" in part &&
+          part.type === "text" &&
+          "text" in part &&
+          typeof part.text === "string"
+        ) {
+          return part.text;
+        }
+
+        return safeJsonStringify(part);
       })
       .join("\n");
+  }
 
-    return {
-      role: message.role,
-      content,
-    };
-  });
+  return safeJsonStringify(content);
 }
 
-function toUsage(usage?: DeepSeekChunk["usage"]): LanguageModelV3Usage {
-  return {
-    inputTokens: {
-      total: usage?.prompt_tokens,
-      noCache: usage?.prompt_tokens,
-      cacheRead: undefined,
-      cacheWrite: undefined,
-    },
-    outputTokens: {
-      total: usage?.completion_tokens,
-      text: usage?.completion_tokens,
-      reasoning: undefined,
-    },
-    raw: usage
-      ? {
-          prompt_tokens: usage.prompt_tokens ?? null,
-          completion_tokens: usage.completion_tokens ?? null,
-          total_tokens: usage.total_tokens ?? null,
-        }
-      : undefined,
-  };
+function formatModelContext(system: string, messages: ModelMessage[]) {
+  const messageText = messages
+    .map(
+      (message, index) =>
+        `[${index}:${message.role}]\n${getModelMessageText(message)}`,
+    )
+    .join("\n\n");
+
+  return `[system]\n${system}\n\n${messageText}`;
 }
 
-function toFinishReason(reason?: string | null): LanguageModelV3FinishReason {
-  switch (reason) {
-    case "stop":
-      return { unified: "stop", raw: reason };
-    case "length":
-      return { unified: "length", raw: reason };
-    case "content_filter":
-      return { unified: "content-filter", raw: reason };
-    case "tool_calls":
-      return { unified: "tool-calls", raw: reason };
-    default:
-      return { unified: "other", raw: reason ?? undefined };
+function getUiMessageText(message: UIMessage) {
+  return message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
+function normalizeWhitespace(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function traceRetrieval(toolName: string, input: unknown, output: unknown) {
+  const query =
+    typeof input === "object" &&
+    input !== null &&
+    "query" in input &&
+    typeof input.query === "string"
+      ? input.query
+      : safeJsonStringify(input);
+
+  const json = parseToolJson<{
+    docs?: Array<{
+      id?: string | number;
+      name?: string;
+      page?: number;
+      page_number?: number;
+      text?: string;
+      content?: string;
+      snippet?: string;
+      excerpt?: string;
+      page_ref?: string;
+    }>;
+    content?: Array<{
+      id?: string | number;
+      name?: string;
+      page?: number;
+      page_number?: number;
+      text?: string;
+      content?: string;
+      snippet?: string;
+      excerpt?: string;
+      page_ref?: string;
+    }>;
+    text?: string;
+    content_text?: string;
+  }>(output);
+  const items = json?.docs ?? json?.content ?? [];
+  const rawText = extractToolText(output);
+  const docCount = items.length || (rawText ? 1 : 0);
+  const docIds = items
+    .map((item, index) => {
+      const parts = [
+        item.id != null ? String(item.id) : null,
+        item.name ?? null,
+        item.page_ref ?? null,
+        item.page != null ? `page:${item.page}` : null,
+        item.page_number != null ? `page:${item.page_number}` : null,
+      ].filter((value): value is string => Boolean(value));
+
+      return parts.length > 0 ? parts.join("@") : `item:${index + 1}`;
+    })
+    .join(", ");
+  const snippets = (
+    items.length > 0
+      ? items.map((item) =>
+          normalizeWhitespace(
+            item.text ??
+              item.content ??
+              item.snippet ??
+              item.excerpt ??
+              "",
+          ),
+        )
+      : [normalizeWhitespace(rawText)]
+  )
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((snippet) => truncateForTrace(snippet, 300));
+
+  console.log(`[TRACE] QUERY: ${query}`);
+  console.log(`[TRACE] DOC_COUNT: ${docCount}`);
+  console.log(`[TRACE] DOC_IDS: ${docIds || "none"}`);
+  console.log("[TRACE] SNIPPETS:");
+
+  if (snippets.length === 0) {
+    console.log("- none");
+    return;
+  }
+
+  for (const snippet of snippets) {
+    console.log(`- ${snippet}`);
+  }
+
+  if (!json && rawText) {
+    console.log(`[TRACE] RAW_${toolName.toUpperCase()}: ${truncateForTrace(rawText, 1000)}`);
   }
 }
 
-function buildRequestBody(options: LanguageModelV3CallOptions, stream: boolean) {
-  return {
-    model: DEEPSEEK_MODEL,
-    messages: toDeepSeekMessages(options.prompt),
-    stream,
-    stream_options: stream ? { include_usage: true } : undefined,
-    temperature: options.temperature,
-    top_p: options.topP,
-    max_tokens: options.maxOutputTokens,
-    stop: options.stopSequences,
-  };
-}
-
-async function callDeepSeek(
-  body: ReturnType<typeof buildRequestBody>,
-  headers?: Record<string, string | undefined>,
-  abortSignal?: AbortSignal,
-) {
-  const response = await fetch(DEEPSEEK_API_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${getApiKey()}`,
-      ...headers,
-    },
-    body: JSON.stringify(body),
-    signal: abortSignal,
-  });
-
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
-  return response;
-}
-
-const deepSeekModel: LanguageModelV3 = {
-  specificationVersion: "v3",
-  provider: "deepseek",
-  modelId: DEEPSEEK_MODEL,
-  supportedUrls: {},
-
-  async doGenerate(
-    options: LanguageModelV3CallOptions,
-  ): Promise<LanguageModelV3GenerateResult> {
-    const requestBody = buildRequestBody(options, false);
-    const response = await callDeepSeek(
-      requestBody,
-      options.headers,
-      options.abortSignal,
-    );
-    const json = (await response.json()) as {
-      id?: string;
-      created?: number;
-      model?: string;
-      choices?: Array<{
-        message?: {
-          content?: string;
-        };
-        finish_reason?: string | null;
-      }>;
-      usage?: DeepSeekChunk["usage"];
-    };
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: json.choices?.[0]?.message?.content ?? "",
-        },
-      ],
-      finishReason: toFinishReason(json.choices?.[0]?.finish_reason),
-      usage: toUsage(json.usage),
-      warnings: [],
-      request: {
-        body: requestBody,
-      },
-      response: {
-        id: json.id,
-        modelId: json.model,
-        timestamp: json.created ? new Date(json.created * 1000) : undefined,
-        headers: Object.fromEntries(response.headers.entries()),
-        body: json,
-      },
-    };
-  },
-
-  async doStream(
-    options: LanguageModelV3CallOptions,
-  ): Promise<LanguageModelV3StreamResult> {
-    const requestBody = buildRequestBody(options, true);
-    const response = await callDeepSeek(
-      requestBody,
-      options.headers,
-      options.abortSignal,
-    );
-
-    if (!response.body) {
-      throw new Error("DeepSeek response body is empty");
+function withTraceLogging<
+  TOOLS extends Record<
+    string,
+    {
+      execute: (...args: unknown[]) => Promise<unknown>;
     }
+  >,
+>(tools: TOOLS): TOOLS {
+  return Object.fromEntries(
+    Object.entries(tools).map(([toolName, tool]) => [
+      toolName,
+      {
+        ...tool,
+        async execute(...args: unknown[]) {
+          const result = await tool.execute(...args);
 
-    const warnings: LanguageModelV3StreamPart[] = [
-      { type: "stream-start", warnings: [] },
-    ];
-
-    let usage = toUsage();
-    let finishReason = toFinishReason("stop");
-    let textStarted = false;
-    let textEnded = false;
-    let finishSent = false;
-    let metadataSent = false;
-    const textId = crypto.randomUUID();
-
-    const stream = new ReadableStream<LanguageModelV3StreamPart>({
-      async start(controller) {
-        for (const part of warnings) {
-          controller.enqueue(part);
-        }
-
-        const reader = response.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        const flushText = () => {
-          if (textStarted && !textEnded) {
-            controller.enqueue({ type: "text-end", id: textId });
-            textEnded = true;
-          }
-        };
-
-        const flushFinish = () => {
-          if (!finishSent) {
-            controller.enqueue({
-              type: "finish",
-              finishReason,
-              usage,
-            });
-            finishSent = true;
-          }
-        };
-
-        const processChunk = (chunk: DeepSeekChunk) => {
-          if (!metadataSent && (chunk.id || chunk.created || chunk.model)) {
-            controller.enqueue({
-              type: "response-metadata",
-              id: chunk.id,
-              modelId: chunk.model,
-              timestamp: chunk.created
-                ? new Date(chunk.created * 1000)
-                : undefined,
-            });
-            metadataSent = true;
+          if (
+            toolName === "find_relevant_documents" ||
+            toolName === "get_document" ||
+            toolName === "get_page_content" ||
+            toolName === "get_document_structure"
+          ) {
+            traceRetrieval(toolName, args[0], result);
           }
 
-          if (chunk.usage) {
-            usage = toUsage(chunk.usage);
-          }
-
-          const choice = chunk.choices?.[0];
-          const delta = choice?.delta?.content;
-
-          if (delta) {
-            if (!textStarted) {
-              controller.enqueue({ type: "text-start", id: textId });
-              textStarted = true;
-            }
-
-            controller.enqueue({
-              type: "text-delta",
-              id: textId,
-              delta,
-            });
-          }
-
-          if (choice?.finish_reason) {
-            finishReason = toFinishReason(choice.finish_reason);
-            flushText();
-            flushFinish();
-          }
-        };
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-
-            if (done) {
-              break;
-            }
-
-            buffer += decoder.decode(value, { stream: true });
-
-            while (buffer.includes("\n\n")) {
-              const boundary = buffer.indexOf("\n\n");
-              const rawEvent = buffer.slice(0, boundary);
-              buffer = buffer.slice(boundary + 2);
-
-              const data = rawEvent
-                .split("\n")
-                .filter((line) => line.startsWith("data:"))
-                .map((line) => line.slice(5).trim())
-                .join("");
-
-              if (!data) {
-                continue;
-              }
-
-              if (data === "[DONE]") {
-                break;
-              }
-
-              const chunk = JSON.parse(data) as DeepSeekChunk;
-
-              if (options.includeRawChunks) {
-                controller.enqueue({
-                  type: "raw",
-                  rawValue: chunk,
-                });
-              }
-
-              processChunk(chunk);
-            }
-          }
-
-          flushText();
-          flushFinish();
-          controller.close();
-        } catch (error) {
-          controller.enqueue({
-            type: "error",
-            error,
-          });
-          controller.close();
-        }
+          return result;
+        },
       },
-    });
+    ]),
+  ) as TOOLS;
+}
 
-    return {
-      stream,
-      request: {
-        body: requestBody,
-      },
-      response: {
-        headers: Object.fromEntries(response.headers.entries()),
-      },
-    };
+function logToolMetadata(
+  tools: Record<
+    string,
+    {
+      execute?: unknown;
+      description?: unknown;
+      inputSchema?: unknown;
+      parameters?: unknown;
+    }
+  >,
+) {
+  for (const [toolName, tool] of Object.entries(tools)) {
+    const hasExecute = typeof tool.execute === "function";
+    const hasDescription =
+      typeof tool.description === "string" && tool.description.trim().length > 0;
+    const hasInputSchema =
+      typeof tool.inputSchema === "object" &&
+      tool.inputSchema !== null &&
+      Object.keys(tool.inputSchema).length > 0;
+    const hasParameters =
+      typeof tool.parameters === "object" &&
+      tool.parameters !== null &&
+      Object.keys(tool.parameters).length > 0;
+
+    console.log(
+      `[chat] tool name=${toolName} execute=${hasExecute} description=${hasDescription} schema=${
+        hasInputSchema || hasParameters
+      }`,
+    );
+  }
+}
+
+function logToolChunk(
+  chunk: {
+    type: string;
+    toolName?: string;
+    toolCallId?: string;
+    delta?: string;
   },
-};
+) {
+  if (
+    chunk.type !== "tool-input-start" &&
+    chunk.type !== "tool-input-delta" &&
+    chunk.type !== "tool-input-end" &&
+    chunk.type !== "tool-call" &&
+    chunk.type !== "tool-result"
+  ) {
+    return;
+  }
+
+  const delta =
+    typeof chunk.delta === "string" && chunk.delta.length > 0
+      ? ` delta=${truncateForTrace(chunk.delta, 120)}`
+      : "";
+
+  console.log(
+    `[chat] tool-event type=${chunk.type}` +
+      (chunk.toolName ? ` name=${chunk.toolName}` : "") +
+      (chunk.toolCallId ? ` id=${chunk.toolCallId}` : "") +
+      delta,
+  );
+}
 
 export async function POST(request: Request) {
   const { messages }: { messages: UIMessage[] } = await request.json();
+  console.log(`[chat] request:start messages=${messages.length}`);
 
-  const result = streamText({
-    model: deepSeekModel,
-    system:
-      "You are a professional assistant for a UK audience.\nYou must ALWAYS respond in English.\nIf the user message is very short (e.g. 'hello'), assume English.",
-    messages: await convertToModelMessages(messages),
+  const mcp = await createMCPClient({
+    transport: {
+      type: "http",
+      url: "https://api.pageindex.ai/mcp",
+      headers: {
+        Authorization: `Bearer ${process.env.PI_API}`,
+      },
+    },
   });
 
-  return result.toUIMessageStreamResponse();
+  try {
+    const tools = await mcp.tools();
+    const chatTools = withTraceLogging(
+      Object.fromEntries(
+      Object.entries(tools).filter(([toolName]) =>
+        ALLOWED_CHAT_TOOL_NAMES.includes(
+          toolName as (typeof ALLOWED_CHAT_TOOL_NAMES)[number],
+        ),
+      ),
+      ) as typeof tools,
+    );
+
+    console.log(
+      `[chat] request:tools-loaded count=${Object.keys(chatTools).length}`,
+    );
+    logToolMetadata(
+      chatTools as Record<
+        string,
+        {
+          execute?: unknown;
+          description?: unknown;
+          inputSchema?: unknown;
+          parameters?: unknown;
+        }
+      >,
+    );
+
+    const modelMessages = await convertToModelMessages(messages);
+
+    console.log(
+      `[TRACE] MODEL_CONTEXT:\n${truncateForTrace(
+        formatModelContext(SYSTEM_PROMPT, modelMessages),
+        1000,
+      )}`,
+    );
+    console.log("[chat] streamText:start");
+    const result = streamText({
+      model: deepseek("deepseek-chat"),
+      stopWhen: stepCountIs(5),
+      tools: chatTools,
+      system: SYSTEM_PROMPT,
+      messages: modelMessages,
+      prepareStep: async ({ stepNumber }) => {
+        if (stepNumber === 0) {
+          return { toolChoice: "required" };
+        }
+
+        return undefined;
+      },
+      onChunk: async ({ chunk }) => {
+        logToolChunk(chunk as {
+          type: string;
+          toolName?: string;
+          toolCallId?: string;
+          delta?: string;
+        });
+      },
+      onStepFinish: ({
+        finishReason,
+        rawFinishReason,
+        toolCalls,
+        toolResults,
+      }) => {
+        const toolCallNames = toolCalls.map((toolCall) => toolCall.toolName);
+        const toolResultNames = toolResults.map(
+          (toolResult) => toolResult.toolName,
+        );
+
+        console.log(
+          `[chat] finish=${finishReason}` +
+            (rawFinishReason ? ` raw=${rawFinishReason}` : "") +
+            ` toolCalls=${toolCalls.length}` +
+            (toolCallNames.length
+              ? ` [${toolCallNames.join(", ")}]`
+              : "") +
+            ` toolResults=${toolResults.length}` +
+            (toolResultNames.length
+              ? ` [${toolResultNames.join(", ")}]`
+              : ""),
+        );
+      },
+      onFinish: async () => {
+        console.log("[chat] streamText:onFinish");
+        await mcp.close();
+        console.log("[chat] mcp:closed");
+      },
+    });
+
+    console.log("[chat] response:returning-ui-stream");
+    return result.toUIMessageStreamResponse({
+      originalMessages: messages,
+      onFinish: ({ responseMessage }) => {
+        console.log(`[TRACE] FINAL_ANSWER:\n${getUiMessageText(responseMessage)}`);
+      },
+    });
+  } catch (error) {
+    console.error("[chat] request:error", error);
+    await mcp.close();
+    console.log("[chat] mcp:closed-after-error");
+    throw error;
+  }
 }
