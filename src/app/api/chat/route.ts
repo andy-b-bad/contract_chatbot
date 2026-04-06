@@ -266,35 +266,38 @@ function traceRetrieval(toolName: string, input: unknown, output: unknown) {
   }
 }
 
-function withTraceLogging<
-  TOOLS extends Record<
-    string,
-    {
-      execute: (...args: unknown[]) => Promise<unknown>;
-    }
-  >,
->(tools: TOOLS): TOOLS {
+type ToolWithExecute = {
+  execute: (...args: never[]) => unknown;
+};
+
+function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
+  tools: TOOLS,
+): TOOLS {
   return Object.fromEntries(
-    Object.entries(tools).map(([toolName, tool]) => [
-      toolName,
-      {
-        ...tool,
-        async execute(...args: unknown[]) {
-          const result = await tool.execute(...args);
+    Object.entries(tools).map(([toolName, tool]) => {
+      const execute = (async (...args: Parameters<typeof tool.execute>) => {
+        const result = await tool.execute(...args);
 
-          if (
-            toolName === "find_relevant_documents" ||
-            toolName === "get_document" ||
-            toolName === "get_page_content" ||
-            toolName === "get_document_structure"
-          ) {
-            traceRetrieval(toolName, args[0], result);
-          }
+        if (
+          toolName === "find_relevant_documents" ||
+          toolName === "get_document" ||
+          toolName === "get_page_content" ||
+          toolName === "get_document_structure"
+        ) {
+          traceRetrieval(toolName, args[0], result);
+        }
 
-          return result;
+        return result;
+      }) as typeof tool.execute;
+
+      return [
+        toolName,
+        {
+          ...tool,
+          execute,
         },
-      },
-    ]),
+      ];
+    }),
   ) as TOOLS;
 }
 
