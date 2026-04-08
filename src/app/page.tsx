@@ -3,6 +3,11 @@
 import { DefaultChatTransport, jsonSchema, type UIMessage } from "ai";
 import { useChat } from "@ai-sdk/react";
 import { useState } from "react";
+import {
+  CONTRACT_SCOPE_OPTIONS,
+  DEFAULT_CONTRACT_SCOPE,
+  type ContractScope,
+} from "./contracts";
 
 type RetrievalStatus = {
   active: boolean;
@@ -15,7 +20,11 @@ type ChatDataParts = {
   retrievalStatus: RetrievalStatus;
 };
 
-type ChatMessage = UIMessage<unknown, ChatDataParts>;
+type ChatMessageMetadata = {
+  scope: ContractScope;
+};
+
+type ChatMessage = UIMessage<ChatMessageMetadata, ChatDataParts>;
 
 const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
   type: "object",
@@ -31,14 +40,24 @@ const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
 
 function getMessageText(message: ChatMessage) {
   return message.parts
-    .filter((part): part is Extract<ChatMessage["parts"][number], { type: "text" }> => part.type === "text")
+    .filter(
+      (
+        part,
+      ): part is Extract<ChatMessage["parts"][number], { type: "text" }> =>
+        part.type === "text",
+    )
     .map((part) => part.text)
     .join("");
 }
 
 export default function Home() {
   const [input, setInput] = useState("");
-  const [retrievalStatus, setRetrievalStatus] = useState<RetrievalStatus | null>(null);
+  const [selectedScope, setSelectedScope] = useState<ContractScope>(
+    DEFAULT_CONTRACT_SCOPE,
+  );
+  const [retrievalStatus, setRetrievalStatus] = useState<RetrievalStatus | null>(
+    null,
+  );
   const { messages, sendMessage, status } = useChat<ChatMessage>({
     transport: new DefaultChatTransport({
       api: "/api/chat",
@@ -75,7 +94,19 @@ export default function Home() {
     }
 
     setInput("");
-    await sendMessage({ text: value });
+    await sendMessage(
+      {
+        text: value,
+        metadata: {
+          scope: selectedScope,
+        },
+      },
+      {
+        body: {
+          selectedScope,
+        },
+      },
+    );
   }
 
   return (
@@ -86,6 +117,34 @@ export default function Home() {
           Minimal streaming chat UI using the Vercel AI SDK.
         </p>
       </header>
+
+      <section className="space-y-2">
+        <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase">
+          Contract Scope
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {CONTRACT_SCOPE_OPTIONS.map((scope) => {
+            const isSelected = scope.id === selectedScope;
+
+            return (
+              <button
+                key={scope.id}
+                type="button"
+                aria-pressed={isSelected}
+                disabled={isLoading}
+                onClick={() => setSelectedScope(scope.id)}
+                className={`rounded-full border px-3 py-2 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                  isSelected
+                    ? "border-zinc-900 bg-zinc-900 text-white"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-500"
+                }`}
+              >
+                {scope.label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
 
       <section className="flex-1 space-y-4 rounded-2xl border border-zinc-200 bg-white p-4">
         {messages.length === 0 && pendingAssistantLabel === null ? (

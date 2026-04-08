@@ -11,6 +11,13 @@ import {
   type UIMessageChunk,
   type UIMessageStreamWriter,
 } from "ai";
+import {
+  getContractScopeOption,
+  isDocumentAllowedForScope,
+  isSharedSummaryDocumentName,
+  parseContractScope,
+  type ContractScope,
+} from "../../contracts";
 
 export const runtime = "edge";
 
@@ -28,6 +35,7 @@ const ALLOWED_CHAT_TOOL_NAMES = [
 
 const RETRIEVAL_STATUS_LABEL = "Retrieving contract content...";
 const RETRIEVAL_TOOL_NAMES = new Set([
+  "recent_documents",
   "find_relevant_documents",
   "get_document",
   "get_document_structure",
@@ -45,9 +53,13 @@ type ChatDataParts = {
   retrievalStatus: RetrievalStatus;
 };
 
-type ChatMessage = UIMessage<unknown, ChatDataParts>;
+type ChatMessageMetadata = {
+  scope: ContractScope;
+};
 
-const SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
+type ChatMessage = UIMessage<ChatMessageMetadata, ChatDataParts>;
+
+const BASE_SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
 
 You ONLY answer using the provided documents and previously retrieved document content in this conversation.
 You MUST NOT use general knowledge, assumptions, likely interpretations, industry norms, or outside facts.
@@ -91,7 +103,9 @@ Answer style:
 - Give the answer in 1-3 sentences where possible.
 - When available, include the exact quoted wording or a brief clause/page reference.
 - Prefer exact wording over summary when the document text directly answers the question.
+- For a straightforward lookup that is explicitly answered by a summary table or rate card line, answer from that line alone and do not add nearby definitions, neighbouring clauses, or extra context unless the user asks for it.
 - Do not broaden the answer beyond what the documents say.
+- Do not prefix the answer with phrases like "Based on the retrieved document" or similar process commentary.
 - Preserve requested formats exactly. If the user asks for a fraction, output only a plain ASCII fraction in a/b form rather than a percentage, decimal, or mixed numeral.
 - When re-expressing an already known value, transform the retrieved value directly instead of searching again.`;
 
@@ -193,7 +207,221 @@ function formatModelContext(system: string, messages: ModelMessage[]) {
   return `[system]\n${system}\n\n${messageText}`;
 }
 
-function getUiMessageText(message: UIMessage) {
+type NamedDocument = {
+  name?: string;
+  status?: string;
+  [key: string]: unknown;
+};
+
+function buildSystemPrompt(selectedScope: ContractScope) {
+  const scopeOption = getContractScopeOption(selectedScope);
+
+  return `${BASE_SYSTEM_PROMPT}
+
+Selected contract scope: ${scopeOption.label}.
+
+Scope rules:
+- The selected contract scope is authoritative for this request.
+- You may use ${scopeOption.label} documents and shared summary documents only.
+- Shared summary documents apply to every scope.
+- For straightforward rates, definitions, payments, overtime, holiday, travel, or similar lookup questions, prefer a shared summary document first when it explicitly answers the question.
+- Only consult the full agreement when the shared summary document does not explicitly answer, or when the user clearly needs fuller contractual wording.
+- Do NOT answer from a different contract scope.
+- Only reuse previously retrieved content if it comes from the same selected scope or a shared summary document.`;
+}
+
+function createToolTextResult(payload: unknown) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}
+
+function getRequestedDocumentName(input: unknown) {
+  if (typeof input !== "object" || input === null) {
+    return undefined;
+  }
+
+  if ("doc_name" in input && typeof input.doc_name === "string") {
+    return input.doc_name;
+  }
+
+  if ("docName" in input && typeof input.docName === "string") {
+    return input.docName;
+  }
+
+  if ("name" in input && typeof input.name === "string") {
+    return input.name;
+  }
+
+  return undefined;
+}
+
+function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
+  if (typeof input !== "object" || input === null) {
+    return input;
+  }
+
+  const scopeOption = getContractScopeOption(selectedScope);
+  const query =
+    "query" in input && typeof input.query === "string" ? input.query.trim() : "";
+  const limit =
+    "limit" in input && typeof input.limit === "number"
+      ? Math.max(input.limit, 12)
+      : 12;
+
+  return {
+    ...input,
+    query: query
+      ? `${query} ${scopeOption.searchHint}`
+      : scopeOption.searchHint,
+    limit,
+  };
+}
+
+function filterDocumentsForScope<T extends NamedDocument>(
+  docs: T[],
+  selectedScope: ContractScope,
+) {
+  const summaryDocs: T[] = [];
+  const scopeDocs: T[] = [];
+  const seenNames = new Set<string>();
+
+  for (const doc of docs) {
+    const docName = typeof doc.name === "string" ? doc.name : undefined;
+
+    if (
+      typeof docName !== "string" ||
+      !isDocumentAllowedForScope(docName, selectedScope)
+    ) {
+      continue;
+    }
+
+    const normalizedName = docName.trim().toLowerCase();
+
+    if (seenNames.has(normalizedName)) {
+      continue;
+    }
+
+    seenNames.add(normalizedName);
+
+    if (isSharedSummaryDocumentName(docName)) {
+      summaryDocs.push(doc);
+    } else {
+      scopeDocs.push(doc);
+    }
+  }
+
+  return [...summaryDocs, ...scopeDocs];
+}
+
+function filterRecentDocumentsResult(
+  result: unknown,
+  selectedScope: ContractScope,
+) {
+  const json = parseToolJson<{
+    docs?: NamedDocument[];
+    ready_count?: number;
+    processing_count?: number;
+    has_more?: boolean;
+    next_cursor?: string;
+    [key: string]: unknown;
+  }>(result);
+
+  if (!json || !Array.isArray(json.docs)) {
+    return result;
+  }
+
+  const docs = filterDocumentsForScope(json.docs, selectedScope);
+  const readyCount = docs.filter((doc) => doc.status === "completed").length;
+  const processingCount = docs.length - readyCount;
+
+  return createToolTextResult({
+    ...json,
+    docs,
+    ready_count: readyCount,
+    processing_count: processingCount,
+    has_more: false,
+    selected_scope: getContractScopeOption(selectedScope).label,
+  });
+}
+
+function filterSearchDocumentsResult(
+  result: unknown,
+  selectedScope: ContractScope,
+) {
+  const json = parseToolJson<{
+    success?: boolean;
+    docs?: NamedDocument[];
+    total_returned?: number;
+    has_more?: boolean;
+    next_steps?: unknown;
+    [key: string]: unknown;
+  }>(result);
+
+  if (!json || !Array.isArray(json.docs)) {
+    return result;
+  }
+
+  const scopeOption = getContractScopeOption(selectedScope);
+  const docs = filterDocumentsForScope(json.docs, selectedScope);
+
+  return createToolTextResult({
+    ...json,
+    success: docs.length > 0 ? json.success ?? true : false,
+    docs,
+    total_returned: docs.length,
+    has_more: false,
+    selected_scope: scopeOption.label,
+    next_steps:
+      docs.length > 0
+        ? json.next_steps
+        : {
+            summary: `No ${scopeOption.label} documents matched this search.`,
+            options: [
+              `Only ${scopeOption.label} documents and shared summary documents are allowed for this request.`,
+            ],
+          },
+  });
+}
+
+function createOutOfScopeToolResult(
+  toolName: string,
+  docName: string,
+  selectedScope: ContractScope,
+) {
+  const scopeOption = getContractScopeOption(selectedScope);
+
+  return createToolTextResult({
+    success: false,
+    tool: toolName,
+    doc_name: docName,
+    selected_scope: scopeOption.label,
+    error: "The requested document is outside the selected contract scope.",
+    allowed_documents: `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
+  });
+}
+
+function filterMessagesForScope(
+  messages: ChatMessage[],
+  selectedScope: ContractScope,
+) {
+  const hasScopeMetadata = messages.some(
+    (message) => typeof message.metadata?.scope === "string",
+  );
+
+  if (!hasScopeMetadata) {
+    return messages;
+  }
+
+  return messages.filter((message) => message.metadata?.scope === selectedScope);
+}
+
+function getUiMessageText(message: ChatMessage) {
   return message.parts
     .filter((part) => part.type === "text")
     .map((part) => part.text)
@@ -369,6 +597,57 @@ type ToolWithExecute = {
   execute: (...args: never[]) => unknown;
 };
 
+function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
+  tools: TOOLS,
+  selectedScope: ContractScope,
+): TOOLS {
+  return Object.fromEntries(
+    Object.entries(tools).map(([toolName, tool]) => {
+      const execute = (async (...args: Parameters<typeof tool.execute>) => {
+        if (toolName === "find_relevant_documents") {
+          const scopedInput = withScopeSearchInput(args[0], selectedScope);
+          const result = await tool.execute(
+            ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+          );
+
+          return filterSearchDocumentsResult(result, selectedScope);
+        }
+
+        if (toolName === "recent_documents") {
+          const result = await tool.execute(...args);
+
+          return filterRecentDocumentsResult(result, selectedScope);
+        }
+
+        if (
+          toolName === "get_document" ||
+          toolName === "get_page_content" ||
+          toolName === "get_document_structure"
+        ) {
+          const docName = getRequestedDocumentName(args[0]);
+
+          if (
+            typeof docName === "string" &&
+            !isDocumentAllowedForScope(docName, selectedScope)
+          ) {
+            return createOutOfScopeToolResult(toolName, docName, selectedScope);
+          }
+        }
+
+        return tool.execute(...args);
+      }) as typeof tool.execute;
+
+      return [
+        toolName,
+        {
+          ...tool,
+          execute,
+        },
+      ];
+    }),
+  ) as TOOLS;
+}
+
 function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
   tools: TOOLS,
 ): TOOLS {
@@ -378,6 +657,7 @@ function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
         const result = await tool.execute(...args);
 
         if (
+          toolName === "recent_documents" ||
           toolName === "find_relevant_documents" ||
           toolName === "get_document" ||
           toolName === "get_page_content" ||
@@ -464,8 +744,20 @@ function logToolChunk(
 }
 
 export async function POST(request: Request) {
-  const { messages }: { messages: ChatMessage[] } = await request.json();
-  console.log(`[chat] request:start messages=${messages.length}`);
+  const {
+    messages,
+    selectedScope: rawSelectedScope,
+  }: {
+    messages: ChatMessage[];
+    selectedScope?: ContractScope;
+  } = await request.json();
+  const selectedScope = parseContractScope(rawSelectedScope);
+  const scopedMessages = filterMessagesForScope(messages, selectedScope);
+  const systemPrompt = buildSystemPrompt(selectedScope);
+
+  console.log(
+    `[chat] request:start messages=${messages.length} scopedMessages=${scopedMessages.length} scope=${selectedScope}`,
+  );
 
   const mcp = await createMCPClient({
     transport: {
@@ -479,14 +771,15 @@ export async function POST(request: Request) {
 
   try {
     const tools = await mcp.tools();
-    const chatTools = withTraceLogging(
-      Object.fromEntries(
+    const filteredTools = Object.fromEntries(
       Object.entries(tools).filter(([toolName]) =>
         ALLOWED_CHAT_TOOL_NAMES.includes(
           toolName as (typeof ALLOWED_CHAT_TOOL_NAMES)[number],
         ),
       ),
-      ) as typeof tools,
+    ) as typeof tools;
+    const chatTools = withTraceLogging(
+      withScopedRetrieval(filteredTools, selectedScope),
     );
 
     console.log(
@@ -504,11 +797,11 @@ export async function POST(request: Request) {
       >,
     );
 
-    const modelMessages = await convertToModelMessages(messages);
+    const modelMessages = await convertToModelMessages(scopedMessages);
 
     console.log(
       `[TRACE] MODEL_CONTEXT:\n${truncateForTrace(
-        formatModelContext(SYSTEM_PROMPT, modelMessages),
+        formatModelContext(systemPrompt, modelMessages),
         1000,
       )}`,
     );
@@ -517,7 +810,7 @@ export async function POST(request: Request) {
       model: deepseek("deepseek-chat"),
       stopWhen: stepCountIs(5),
       tools: chatTools,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (stepNumber === 0) {
@@ -578,7 +871,11 @@ export async function POST(request: Request) {
             toolName: undefined as string | undefined,
             toolCallId: undefined as string | undefined,
           };
-          const uiStream = result.toUIMessageStream<ChatMessage>();
+          const uiStream = result.toUIMessageStream<ChatMessage>({
+            messageMetadata: () => ({
+              scope: selectedScope,
+            }),
+          });
           const reader = uiStream.getReader();
 
           try {
