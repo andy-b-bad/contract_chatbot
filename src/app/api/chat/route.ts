@@ -1,11 +1,15 @@
 import { createMCPClient } from "@ai-sdk/mcp";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   convertToModelMessages,
   stepCountIs,
   streamText,
   type ModelMessage,
   type UIMessage,
+  type UIMessageChunk,
+  type UIMessageStreamWriter,
 } from "ai";
 
 export const runtime = "edge";
@@ -21,6 +25,27 @@ const ALLOWED_CHAT_TOOL_NAMES = [
   "get_document_structure",
   "get_page_content",
 ] as const;
+
+const RETRIEVAL_STATUS_LABEL = "Retrieving contract content...";
+const RETRIEVAL_TOOL_NAMES = new Set([
+  "find_relevant_documents",
+  "get_document",
+  "get_document_structure",
+  "get_page_content",
+]);
+
+type RetrievalStatus = {
+  active: boolean;
+  label: string;
+  toolName?: string;
+  toolCallId?: string;
+};
+
+type ChatDataParts = {
+  retrievalStatus: RetrievalStatus;
+};
+
+type ChatMessage = UIMessage<unknown, ChatDataParts>;
 
 const SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
 
@@ -173,6 +198,80 @@ function getUiMessageText(message: UIMessage) {
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("");
+}
+
+function isRetrievalToolName(toolName: string | undefined) {
+  return typeof toolName === "string" && RETRIEVAL_TOOL_NAMES.has(toolName);
+}
+
+function writeRetrievalStatus(
+  writer: UIMessageStreamWriter<ChatMessage>,
+  status: RetrievalStatus,
+) {
+  writer.write({
+    type: "data-retrievalStatus",
+    data: status,
+    transient: true,
+  });
+}
+
+function syncRetrievalStatusFromChunk(
+  writer: UIMessageStreamWriter<ChatMessage>,
+  chunk: UIMessageChunk<unknown, ChatDataParts>,
+  retrievalState: {
+    active: boolean;
+    toolName?: string;
+    toolCallId?: string;
+  },
+) {
+  switch (chunk.type) {
+    case "tool-input-start":
+    case "tool-input-available": {
+      if (!isRetrievalToolName(chunk.toolName)) {
+        return;
+      }
+
+      if (retrievalState.active) {
+        return;
+      }
+
+      retrievalState.active = true;
+      retrievalState.toolName = chunk.toolName;
+      retrievalState.toolCallId = chunk.toolCallId;
+      writeRetrievalStatus(writer, {
+        active: true,
+        label: RETRIEVAL_STATUS_LABEL,
+        toolName: chunk.toolName,
+        toolCallId: chunk.toolCallId,
+      });
+      return;
+    }
+
+    case "text-start":
+    case "text-delta":
+    case "finish":
+    case "abort":
+    case "error": {
+      if (!retrievalState.active) {
+        return;
+      }
+
+      const { toolName, toolCallId } = retrievalState;
+      retrievalState.active = false;
+      retrievalState.toolName = undefined;
+      retrievalState.toolCallId = undefined;
+      writeRetrievalStatus(writer, {
+        active: false,
+        label: RETRIEVAL_STATUS_LABEL,
+        toolName,
+        toolCallId,
+      });
+      return;
+    }
+
+    default:
+      return;
+  }
 }
 
 function normalizeWhitespace(text: string) {
@@ -365,7 +464,7 @@ function logToolChunk(
 }
 
 export async function POST(request: Request) {
-  const { messages }: { messages: UIMessage[] } = await request.json();
+  const { messages }: { messages: ChatMessage[] } = await request.json();
   console.log(`[chat] request:start messages=${messages.length}`);
 
   const mcp = await createMCPClient({
@@ -467,11 +566,51 @@ export async function POST(request: Request) {
     });
 
     console.log("[chat] response:returning-ui-stream");
-    return result.toUIMessageStreamResponse({
-      originalMessages: messages,
-      onFinish: ({ responseMessage }) => {
-        console.log(`[TRACE] FINAL_ANSWER:\n${getUiMessageText(responseMessage)}`);
-      },
+    return createUIMessageStreamResponse({
+      stream: createUIMessageStream<ChatMessage>({
+        originalMessages: messages,
+        onFinish: ({ responseMessage }) => {
+          console.log(`[TRACE] FINAL_ANSWER:\n${getUiMessageText(responseMessage)}`);
+        },
+        execute: async ({ writer }) => {
+          const retrievalState = {
+            active: false,
+            toolName: undefined as string | undefined,
+            toolCallId: undefined as string | undefined,
+          };
+          const uiStream = result.toUIMessageStream<ChatMessage>();
+          const reader = uiStream.getReader();
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+
+              if (done) {
+                break;
+              }
+
+              syncRetrievalStatusFromChunk(
+                writer,
+                value,
+                retrievalState,
+              );
+              writer.write(value);
+            }
+          } finally {
+            if (retrievalState.active) {
+              retrievalState.active = false;
+              writeRetrievalStatus(writer, {
+                active: false,
+                label: RETRIEVAL_STATUS_LABEL,
+                toolName: retrievalState.toolName,
+                toolCallId: retrievalState.toolCallId,
+              });
+            }
+
+            reader.releaseLock();
+          }
+        },
+      }),
     });
   } catch (error) {
     console.error("[chat] request:error", error);

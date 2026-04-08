@@ -1,18 +1,69 @@
 "use client";
 
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, jsonSchema, type UIMessage } from "ai";
 import { useChat } from "@ai-sdk/react";
 import { useState } from "react";
 
+type RetrievalStatus = {
+  active: boolean;
+  label: string;
+  toolName?: string;
+  toolCallId?: string;
+};
+
+type ChatDataParts = {
+  retrievalStatus: RetrievalStatus;
+};
+
+type ChatMessage = UIMessage<unknown, ChatDataParts>;
+
+const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    active: { type: "boolean" },
+    label: { type: "string" },
+    toolName: { type: "string" },
+    toolCallId: { type: "string" },
+  },
+  required: ["active", "label"],
+});
+
+function getMessageText(message: ChatMessage) {
+  return message.parts
+    .filter((part): part is Extract<ChatMessage["parts"][number], { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
-  const { messages, sendMessage, status } = useChat({
+  const [retrievalStatus, setRetrievalStatus] = useState<RetrievalStatus | null>(null);
+  const { messages, sendMessage, status } = useChat<ChatMessage>({
     transport: new DefaultChatTransport({
       api: "/api/chat",
     }),
+    dataPartSchemas: {
+      retrievalStatus: RETRIEVAL_STATUS_SCHEMA,
+    },
+    onData: (part) => {
+      if (part.type !== "data-retrievalStatus") {
+        return;
+      }
+
+      setRetrievalStatus(part.data.active ? part.data : null);
+    },
+    onFinish: () => {
+      setRetrievalStatus(null);
+    },
+    onError: () => {
+      setRetrievalStatus(null);
+    },
   });
 
   const isLoading = status === "submitted" || status === "streaming";
+  const pendingAssistantLabel =
+    retrievalStatus?.label ?? (status === "submitted" ? "Preparing response..." : null);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -37,31 +88,48 @@ export default function Home() {
       </header>
 
       <section className="flex-1 space-y-4 rounded-2xl border border-zinc-200 bg-white p-4">
-        {messages.length === 0 ? (
+        {messages.length === 0 && pendingAssistantLabel === null ? (
           <p className="text-sm text-zinc-500">No messages yet.</p>
         ) : (
-          messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex ${
-                message.role === "user" ? "justify-end" : "justify-start"
-              }`}
-            >
-              <div
-                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                  message.role === "user"
-                    ? "bg-zinc-900 text-white"
-                    : "bg-zinc-100 text-zinc-900"
-                }`}
-              >
-                {message.parts
-                  .filter((part) => part.type === "text")
-                  .map((part, index) => (
-                    <span key={`${message.id}-${index}`}>{part.text}</span>
-                  ))}
+          <>
+            {messages.map((message) => {
+              const text = getMessageText(message);
+
+              if (text.length === 0) {
+                return null;
+              }
+
+              return (
+                <div
+                  key={message.id}
+                  className={`flex ${
+                    message.role === "user" ? "justify-end" : "justify-start"
+                  }`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                      message.role === "user"
+                        ? "bg-zinc-900 text-white"
+                        : "bg-zinc-100 text-zinc-900"
+                    }`}
+                  >
+                    {text}
+                  </div>
+                </div>
+              );
+            })}
+
+            {pendingAssistantLabel ? (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-zinc-900">
+                  <div className="flex items-center gap-2">
+                    <span className="size-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span>{pendingAssistantLabel}</span>
+                  </div>
+                </div>
               </div>
-            </div>
-          ))
+            ) : null}
+          </>
         )}
       </section>
 
