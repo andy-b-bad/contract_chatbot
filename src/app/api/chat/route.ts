@@ -13,7 +13,9 @@ import {
 } from "ai";
 import {
   getContractScopeOption,
+  getSharedSummaryPageRange,
   isDocumentAllowedForScope,
+  isSharedSummaryPageSelectionAllowed,
   isSharedSummaryDocumentName,
   parseContractScope,
   type ContractScope,
@@ -90,6 +92,7 @@ Behaviour:
 - Only output the final answer.
 - Keep answers concise, precise, and document-bound.
 - Follow the user's instructions exactly.
+- Never invent document names. Only use exact document names returned by the tools.
 - Reuse previously retrieved information whenever it is sufficient.
 - Do not perform additional searches if the answer can already be given from existing evidence.
 - As soon as you have enough evidence, stop and answer.
@@ -215,6 +218,7 @@ type NamedDocument = {
 
 function buildSystemPrompt(selectedScope: ContractScope) {
   const scopeOption = getContractScopeOption(selectedScope);
+  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
 
   return `${BASE_SYSTEM_PROMPT}
 
@@ -225,9 +229,13 @@ Scope rules:
 - You may use ${scopeOption.label} documents and shared summary documents only.
 - Shared summary documents apply to every scope.
 - For straightforward rates, definitions, payments, overtime, holiday, travel, or similar lookup questions, prefer a shared summary document first when it explicitly answers the question.
+- For shared summary documents in this scope, only use pages ${sharedSummaryPages}.
+- Do NOT call get_document_structure on a shared summary document.
+- If you use a shared summary document, call get_page_content directly with pages "${sharedSummaryPages}" or a subrange within it.
 - Only consult the full agreement when the shared summary document does not explicitly answer, or when the user clearly needs fuller contractual wording.
 - Do NOT answer from a different contract scope.
-- Only reuse previously retrieved content if it comes from the same selected scope or a shared summary document.`;
+- Only reuse previously retrieved content if it comes from the same selected scope or a shared summary document.
+- Do not add content from adjacent pages or neighbouring contract sections in the shared summary document.`;
 }
 
 function createToolTextResult(payload: unknown) {
@@ -256,6 +264,26 @@ function getRequestedDocumentName(input: unknown) {
 
   if ("name" in input && typeof input.name === "string") {
     return input.name;
+  }
+
+  return undefined;
+}
+
+function getRequestedPages(input: unknown) {
+  if (typeof input !== "object" || input === null) {
+    return undefined;
+  }
+
+  if ("pages" in input) {
+    const pages = input.pages;
+
+    if (typeof pages === "string") {
+      return pages;
+    }
+
+    if (typeof pages === "number" && Number.isFinite(pages)) {
+      return String(pages);
+    }
   }
 
   return undefined;
@@ -319,6 +347,46 @@ function filterDocumentsForScope<T extends NamedDocument>(
   return [...summaryDocs, ...scopeDocs];
 }
 
+function decorateDocumentsForScope(
+  docs: NamedDocument[],
+  selectedScope: ContractScope,
+) {
+  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
+
+  return docs.map((doc) => {
+    if (
+      typeof doc.name === "string" &&
+      isSharedSummaryDocumentName(doc.name)
+    ) {
+      return {
+        ...doc,
+        shared_summary_pages: sharedSummaryPages,
+      };
+    }
+
+    return doc;
+  });
+}
+
+function getSharedSummaryNextStepOption(
+  docs: NamedDocument[],
+  selectedScope: ContractScope,
+) {
+  const summaryDoc = docs.find(
+    (doc) =>
+      typeof doc.name === "string" &&
+      isSharedSummaryDocumentName(doc.name),
+  );
+
+  if (typeof summaryDoc?.name !== "string") {
+    return null;
+  }
+
+  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
+
+  return `For the shared summary, call get_page_content(doc_name: "${summaryDoc.name}", pages: "${sharedSummaryPages}")`;
+}
+
 function filterRecentDocumentsResult(
   result: unknown,
   selectedScope: ContractScope,
@@ -337,16 +405,33 @@ function filterRecentDocumentsResult(
   }
 
   const docs = filterDocumentsForScope(json.docs, selectedScope);
+  const scopedDocs = decorateDocumentsForScope(docs, selectedScope);
   const readyCount = docs.filter((doc) => doc.status === "completed").length;
   const processingCount = docs.length - readyCount;
+  const sharedSummaryOption = getSharedSummaryNextStepOption(
+    scopedDocs,
+    selectedScope,
+  );
 
   return createToolTextResult({
     ...json,
-    docs,
+    docs: scopedDocs,
     ready_count: readyCount,
     processing_count: processingCount,
     has_more: false,
     selected_scope: getContractScopeOption(selectedScope).label,
+    next_steps:
+      sharedSummaryOption && typeof json.next_steps === "object" && json.next_steps !== null
+        ? {
+            ...json.next_steps,
+            options: Array.isArray((json.next_steps as { options?: unknown }).options)
+              ? [
+                  ...((json.next_steps as { options: string[] }).options),
+                  sharedSummaryOption,
+                ]
+              : [sharedSummaryOption],
+          }
+        : json.next_steps,
   });
 }
 
@@ -369,23 +454,79 @@ function filterSearchDocumentsResult(
 
   const scopeOption = getContractScopeOption(selectedScope);
   const docs = filterDocumentsForScope(json.docs, selectedScope);
+  const scopedDocs = decorateDocumentsForScope(docs, selectedScope);
+  const sharedSummaryOption = getSharedSummaryNextStepOption(
+    scopedDocs,
+    selectedScope,
+  );
 
   return createToolTextResult({
     ...json,
-    success: docs.length > 0 ? json.success ?? true : false,
-    docs,
-    total_returned: docs.length,
+    success: scopedDocs.length > 0 ? json.success ?? true : false,
+    docs: scopedDocs,
+    total_returned: scopedDocs.length,
     has_more: false,
     selected_scope: scopeOption.label,
     next_steps:
-      docs.length > 0
-        ? json.next_steps
+      scopedDocs.length > 0
+        ? sharedSummaryOption &&
+          typeof json.next_steps === "object" &&
+          json.next_steps !== null
+          ? {
+              ...json.next_steps,
+              options: Array.isArray((json.next_steps as { options?: unknown }).options)
+                ? [
+                    ...((json.next_steps as { options: string[] }).options),
+                    sharedSummaryOption,
+                  ]
+                : [sharedSummaryOption],
+            }
+          : json.next_steps
         : {
             summary: `No ${scopeOption.label} documents matched this search.`,
             options: [
               `Only ${scopeOption.label} documents and shared summary documents are allowed for this request.`,
             ],
           },
+  });
+}
+
+function parseToolDocs(result: unknown) {
+  const json = parseToolJson<{
+    docs?: NamedDocument[];
+  }>(result);
+
+  if (!json || !Array.isArray(json.docs)) {
+    return null;
+  }
+
+  return json.docs;
+}
+
+function createFallbackSearchResult(
+  docs: NamedDocument[],
+  selectedScope: ContractScope,
+) {
+  const scopeOption = getContractScopeOption(selectedScope);
+  const sharedSummaryOption = getSharedSummaryNextStepOption(
+    docs,
+    selectedScope,
+  );
+
+  return createToolTextResult({
+    success: docs.length > 0,
+    docs,
+    search_mode: "scope_fallback_recent_documents",
+    total_returned: docs.length,
+    has_more: false,
+    selected_scope: scopeOption.label,
+    next_steps: {
+      summary: `No direct ${scopeOption.label} search match. Showing allowed recent documents instead.`,
+      options: [
+        `${docs.length} allowed document(s) are available for ${scopeOption.label}.`,
+        ...(sharedSummaryOption ? [sharedSummaryOption] : []),
+      ],
+    },
   });
 }
 
@@ -404,6 +545,74 @@ function createOutOfScopeToolResult(
     error: "The requested document is outside the selected contract scope.",
     allowed_documents: `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
   });
+}
+
+function createScopedSummaryDocumentResult(
+  docName: string,
+  selectedScope: ContractScope,
+) {
+  const scopeOption = getContractScopeOption(selectedScope);
+  const allowedPages = getSharedSummaryPageRange(selectedScope);
+
+  return createToolTextResult({
+    success: true,
+    doc_name: docName,
+    selected_scope: scopeOption.label,
+    shared_summary_pages: allowedPages,
+    next_steps: {
+      summary: `Use the shared summary only within pages ${allowedPages} for ${scopeOption.label}.`,
+      options: [
+        `Call get_page_content(doc_name: "${docName}", pages: "${allowedPages}")`,
+      ],
+    },
+  });
+}
+
+function createSharedSummaryStructureBlockedResult(
+  docName: string,
+  selectedScope: ContractScope,
+) {
+  const scopeOption = getContractScopeOption(selectedScope);
+  const allowedPages = getSharedSummaryPageRange(selectedScope);
+
+  return createToolTextResult({
+    success: false,
+    tool: "get_document_structure",
+    doc_name: docName,
+    selected_scope: scopeOption.label,
+    error: "Shared summary structure is disabled for scoped requests.",
+    shared_summary_pages: allowedPages,
+    next_steps: {
+      summary: `Use get_page_content only within pages ${allowedPages} for ${scopeOption.label}.`,
+      options: [
+        `Call get_page_content(doc_name: "${docName}", pages: "${allowedPages}")`,
+      ],
+    },
+  });
+}
+
+function withScopedSummaryPages(
+  input: unknown,
+  selectedScope: ContractScope,
+) {
+  if (typeof input !== "object" || input === null) {
+    return input;
+  }
+
+  const allowedPages = getSharedSummaryPageRange(selectedScope);
+  const requestedPages = getRequestedPages(input);
+
+  if (
+    typeof requestedPages === "string" &&
+    isSharedSummaryPageSelectionAllowed(requestedPages, selectedScope)
+  ) {
+    return input;
+  }
+
+  return {
+    ...input,
+    pages: allowedPages,
+  };
 }
 
 function filterMessagesForScope(
@@ -609,8 +818,37 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
           const result = await tool.execute(
             ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
           );
+          const filteredResult = filterSearchDocumentsResult(result, selectedScope);
+          const filteredDocs = parseToolDocs(filteredResult);
 
-          return filterSearchDocumentsResult(result, selectedScope);
+          if (filteredDocs && filteredDocs.length > 0) {
+            return filteredResult;
+          }
+
+          const recentDocumentsTool = tools.recent_documents;
+
+          if (recentDocumentsTool) {
+            const recentResult = await (
+              recentDocumentsTool.execute as (...toolArgs: unknown[]) => Promise<unknown>
+            )({ limit: 20 });
+            const recentDocs = parseToolDocs(recentResult);
+
+            if (recentDocs) {
+              const scopedRecentDocs = decorateDocumentsForScope(
+                filterDocumentsForScope(recentDocs, selectedScope),
+                selectedScope,
+              );
+
+              if (scopedRecentDocs.length > 0) {
+                return createFallbackSearchResult(
+                  scopedRecentDocs,
+                  selectedScope,
+                );
+              }
+            }
+          }
+
+          return filteredResult;
         }
 
         if (toolName === "recent_documents") {
@@ -631,6 +869,30 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             !isDocumentAllowedForScope(docName, selectedScope)
           ) {
             return createOutOfScopeToolResult(toolName, docName, selectedScope);
+          }
+
+          if (
+            typeof docName === "string" &&
+            isSharedSummaryDocumentName(docName)
+          ) {
+            if (toolName === "get_document") {
+              return createScopedSummaryDocumentResult(docName, selectedScope);
+            }
+
+            if (toolName === "get_document_structure") {
+              return createSharedSummaryStructureBlockedResult(
+                docName,
+                selectedScope,
+              );
+            }
+
+            if (toolName === "get_page_content") {
+              const scopedInput = withScopedSummaryPages(args[0], selectedScope);
+
+              return tool.execute(
+                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+              );
+            }
           }
         }
 
