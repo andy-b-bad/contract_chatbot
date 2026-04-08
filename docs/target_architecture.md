@@ -1,12 +1,22 @@
 # Target Architecture
 
-This product should be architected as a PageIndex application wrapped in a Vercel application shell, not as a Vercel RAG app with PageIndex bolted on.
+This product should be architected as a Vercel application shell around a PageIndex document engine, using policy-constrained agentic retrieval over PageIndex MCP.
 
 ## Architectural Primacy
 
-PageIndex is the primary retrieval system for this product.
+PageIndex is the primary document engine for this product.
 
-Retrieval quality, document navigation, and grounded answer generation should be designed around PageIndex’s retrieval model and recommended usage patterns. This application is not intended to use a generic Vercel-style RAG architecture as its source of retrieval truth.
+In this architecture, PageIndex-led means that PageIndex owns:
+
+- document ingestion
+- document processing or transformation
+- retrieval over document content
+- document structure access and navigation primitives
+- document-grounded evidence access
+
+PageIndex-led does not require PageIndex to own end-to-end chat orchestration.
+
+This architecture explicitly allows policy-constrained agentic retrieval over PageIndex MCP. The model may use PageIndex tools, but only within repo-defined product policy and scope boundaries.
 
 Vercel’s role is secondary and infrastructural. Vercel is used for:
 
@@ -16,16 +26,17 @@ Vercel’s role is secondary and infrastructural. Vercel is used for:
 - app hosting and deployment
 - observability and operational support where appropriate
 
-PageIndex’s role is primary in the document-answering core. It should own:
+The repo owns the product control layer. It must own:
 
-- document indexing
-- retrieval and navigation over document structure
-- document-grounded evidence access
-- retrieval patterns that produce high-quality grounded answers
+- contract and document identity
+- explicit contract or guide selection
+- scope control
+- reuse boundaries
+- provenance policy
 
-Where Vercel guidance and PageIndex guidance differ on retrieval architecture, PageIndex should be treated as authoritative.
+The architectural problem to solve is not agentic tool use itself. The problem is leaving contract scope, document identity, reuse policy, and provenance policy to unconstrained model behavior.
 
-A major architectural risk is drifting back into a generic app-led or framework-led RAG pattern that does not reflect how PageIndex is intended to be used.
+Where Vercel guidance and PageIndex guidance differ on document-engine concerns, PageIndex should be treated as authoritative. Where application-shell, UI delivery, and deployment concerns arise, Vercel should be treated as authoritative.
 
 ## Priority Order
 
@@ -98,6 +109,8 @@ The interface must include a prominent pre-select control for contract or guide 
 
 For MVP, this may default to the single available contract. For multi-contract production, the selection must be explicit and treated as part of retrieval scope and answer context.
 
+If no valid contract or guide scope is selected, the system must refuse to answer.
+
 ### Query and Answer Flow
 
 The user asks a question in natural language.
@@ -111,7 +124,7 @@ Answers must be:
 - phrased for a UK audience
 - limited to what the selected documents support
 
-If the answer is not explicitly supported by the selected document set, the system should clearly say so.
+If sufficient evidence is not available within the selected scope, the system must clearly say so.
 
 ### Front End and Responsiveness
 
@@ -145,6 +158,36 @@ The retrieval layer should ensure that:
 - answer provenance is preserved
 - answers can be audited against source content
 - the system can scale from one document to several without brittle prompt hacks
+
+### Policy-Constrained Agentic Retrieval
+
+The approved retrieval pattern is policy-constrained agentic retrieval over PageIndex MCP.
+
+In this pattern:
+
+- PageIndex remains the document engine
+- the repo defines contract scope, document identity, provenance policy, and reuse boundaries
+- the model may use PageIndex tools only within the repo-approved scope
+- the model must not be exposed to any tool surface that allows it to bypass or reconstruct scope outside these constraints
+
+The model may:
+
+- choose tools within approved scope
+- sequence retrieval within approved scope
+- navigate document structure within approved scope
+- synthesize the final answer from retrieved evidence
+
+The model must not:
+
+- choose contract scope
+- widen scope beyond repo-approved boundaries
+- switch contracts or documents without repo approval
+- own reuse policy or cross-contract behaviour
+
+The system must refuse to answer when:
+
+- no valid contract or guide scope is selected
+- sufficient evidence cannot be retrieved within the selected scope
 
 ---
 
@@ -188,7 +231,7 @@ The target architecture should include a persistence layer for at least:
 
 1. document catalogue
 2. contract selection metadata
-3. FAQ / ideal answers
+3. FAQ or ideal answers
 4. previous user questions and stored responses
 5. analytics events
 6. cost and usage records
@@ -207,7 +250,7 @@ Desired visibility includes:
 - number of queries
 - query types or categories
 - selected contract or guide
-- cache hit versus full retrieval/generation
+- cache hit versus full retrieval or generation
 - model and tool usage
 - response latency
 - token usage and estimated cost
@@ -262,7 +305,7 @@ The user should feel that the app responds promptly, even when full answer gener
 - contract and guide selection
 - document-grounded question answering
 - multiple contract support
-- FAQ / ideal-answer support
+- FAQ or ideal-answer support
 - reuse of previous answers where safe
 - analytics and cost visibility
 - rate limiting and abuse prevention
@@ -293,9 +336,9 @@ The architecture should evolve from a single-document MVP into a multi-contract 
 
 It should favour clarity, auditability, and maintainability over clever but brittle prompt-only behaviour.
 
-Architecture and refactor decisions must be grounded in the provided project documentation in `docs/`. Where retrieval design is concerned, PageIndex documentation is authoritative. Where application-shell, UI delivery, and deployment behavior are concerned, Vercel documentation is authoritative.
+The target runtime shape is policy-constrained agentic retrieval over PageIndex MCP, wrapped by a Vercel application shell. This architecture keeps PageIndex as the document engine, keeps Vercel as the application shell, and moves product-policy ownership into the repo.
 
-Future refactors should compare the implementation against PageIndex documentation and examples first, then determine how Vercel should wrap that behaviour.
+Future refactors should compare the implementation against PageIndex documentation and examples first for document-engine capabilities, then determine how the repo should apply product policy and how Vercel should wrap that behaviour.
 
 ---
 
@@ -305,7 +348,9 @@ Future refactors should compare the implementation against PageIndex documentati
 - Contract selection must be explicit once multiple contracts are present.
 - The system must not mix contract answers accidentally.
 - Reused answers must respect contract scope.
-- Retrieval architecture must be PageIndex-led, not generic Vercel-RAG-led.
+- Retrieval architecture must remain PageIndex-based through policy-constrained agentic retrieval on PageIndex MCP.
+- The repo must own contract and document identity, explicit selection, scope control, reuse boundaries, and provenance policy.
+- The system must refuse when no valid scope is selected or when sufficient evidence is not available within scope.
 - The product must feel fast and professional.
 - The architecture must support expansion beyond the current single-contract MVP.
 
@@ -315,9 +360,7 @@ Future refactors should compare the implementation against PageIndex documentati
 
 These items are important but not yet fixed:
 
-- whether the current Vercel AI SDK + DeepSeek path is the correct runtime for a PageIndex-first architecture
-- whether a PageIndex-provided SDK or runtime pattern should replace or bypass parts of the current Vercel tool-calling path
-- which parts of the stack should remain Vercel-owned versus PageIndex-owned
+- how product-level contract and guide selections should map to PageIndex document or folder scope
 - what persistence layer should store FAQ, cache, analytics, and question history
 - whether Vercel-native analytics is sufficient or app-level analytics is required
 - whether Vercel-native protections are sufficient for rate limiting and abuse prevention
