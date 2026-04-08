@@ -112,15 +112,15 @@ export default function Home() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Contract Chatbot</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">BSR Contract Chatbot</h1>
         <p className="text-sm text-zinc-600">
-          Minimal streaming chat UI using the Vercel AI SDK.
+          Contract-Scoped Retrieval-Augmented Chat Interface: Clause-Level Contract Intelligence for Stunt Perfromers in Film & TV
         </p>
       </header>
 
       <section className="space-y-2">
         <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase">
-          Contract Scope
+          Choose your contract
         </p>
         <div className="flex flex-wrap gap-2">
           {CONTRACT_SCOPE_OPTIONS.map((scope) => {
