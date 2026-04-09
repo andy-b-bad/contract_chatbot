@@ -7,7 +7,6 @@ import {
   stepCountIs,
   streamText,
   type ModelMessage,
-  type UIMessage,
   type UIMessageChunk,
   type UIMessageStreamWriter,
 } from "ai";
@@ -20,6 +19,21 @@ import {
   parseContractScope,
   type ContractScope,
 } from "../../contracts";
+import {
+  getChatMessageText,
+  type ChatDataParts,
+  type ChatMessage,
+  type RetrievalStatus,
+} from "@/lib/chat";
+import {
+  persistAssistantTurnWithAuditIfNeeded,
+  persistUserTurnIfNeeded,
+  resolveChatSession,
+} from "@/lib/chat-session";
+import {
+  createRetrievalAuditCollector,
+  type RetrievalAuditTraceData,
+} from "@/lib/retrieval-audit";
 
 export const runtime = "edge";
 
@@ -43,23 +57,6 @@ const RETRIEVAL_TOOL_NAMES = new Set([
   "get_document_structure",
   "get_page_content",
 ]);
-
-type RetrievalStatus = {
-  active: boolean;
-  label: string;
-  toolName?: string;
-  toolCallId?: string;
-};
-
-type ChatDataParts = {
-  retrievalStatus: RetrievalStatus;
-};
-
-type ChatMessageMetadata = {
-  scope: ContractScope;
-};
-
-type ChatMessage = UIMessage<ChatMessageMetadata, ChatDataParts>;
 
 const BASE_SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
 
@@ -631,10 +628,19 @@ function filterMessagesForScope(
 }
 
 function getUiMessageText(message: ChatMessage) {
-  return message.parts
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("");
+  return getChatMessageText(message);
+}
+
+function getLatestUserMessage(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+
+    if (message.role === "user") {
+      return message;
+    }
+  }
+
+  return undefined;
 }
 
 function isRetrievalToolName(toolName: string | undefined) {
@@ -715,7 +721,27 @@ function normalizeWhitespace(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function traceRetrieval(toolName: string, input: unknown, output: unknown) {
+type RetrievalTraceItem = {
+  id?: string | number;
+  name?: string;
+  page?: number;
+  page_number?: number;
+  text?: string;
+  content?: string;
+  snippet?: string;
+  excerpt?: string;
+  page_ref?: string;
+};
+
+type RetrievalTraceSummary = {
+  query: string;
+  docCount: number;
+  docIds: string;
+  rawText: string;
+  hasStructuredJson: boolean;
+} & RetrievalAuditTraceData;
+
+function buildTraceSummary(input: unknown, output: unknown): RetrievalTraceSummary {
   const query =
     typeof input === "object" &&
     input !== null &&
@@ -725,28 +751,8 @@ function traceRetrieval(toolName: string, input: unknown, output: unknown) {
       : safeJsonStringify(input);
 
   const json = parseToolJson<{
-    docs?: Array<{
-      id?: string | number;
-      name?: string;
-      page?: number;
-      page_number?: number;
-      text?: string;
-      content?: string;
-      snippet?: string;
-      excerpt?: string;
-      page_ref?: string;
-    }>;
-    content?: Array<{
-      id?: string | number;
-      name?: string;
-      page?: number;
-      page_number?: number;
-      text?: string;
-      content?: string;
-      snippet?: string;
-      excerpt?: string;
-      page_ref?: string;
-    }>;
+    docs?: RetrievalTraceItem[];
+    content?: RetrievalTraceItem[];
     text?: string;
     content_text?: string;
   }>(output);
@@ -782,24 +788,77 @@ function traceRetrieval(toolName: string, input: unknown, output: unknown) {
     .filter(Boolean)
     .slice(0, 2)
     .map((snippet) => truncateForTrace(snippet, 300));
+  const documentNames = Array.from(
+    new Set(
+      [
+        ...items
+          .map((item) => item.name?.trim())
+          .filter((value): value is string => Boolean(value)),
+        getRequestedDocumentName(input)?.trim(),
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  );
+  const pageRefs = Array.from(
+    new Set(
+      [
+        ...items
+          .map((item) => {
+            if (typeof item.page_ref === "string" && item.page_ref.trim().length > 0) {
+              return item.page_ref.trim();
+            }
 
-  console.log(`[TRACE] QUERY: ${query}`);
-  console.log(`[TRACE] DOC_COUNT: ${docCount}`);
-  console.log(`[TRACE] DOC_IDS: ${docIds || "none"}`);
+            if (typeof item.page === "number") {
+              return String(item.page);
+            }
+
+            if (typeof item.page_number === "number") {
+              return String(item.page_number);
+            }
+
+            return undefined;
+          })
+          .filter((value): value is string => Boolean(value)),
+        getRequestedPages(input)?.trim(),
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  );
+
+  return {
+    query,
+    docCount,
+    docIds,
+    snippets,
+    rawText,
+    hasStructuredJson: Boolean(json),
+    documentNames,
+    pageRefs,
+  };
+}
+
+function traceRetrieval(toolName: string, input: unknown, output: unknown) {
+  const summary = buildTraceSummary(input, output);
+
+  console.log(`[TRACE] QUERY: ${summary.query}`);
+  console.log(`[TRACE] DOC_COUNT: ${summary.docCount}`);
+  console.log(`[TRACE] DOC_IDS: ${summary.docIds || "none"}`);
   console.log("[TRACE] SNIPPETS:");
 
-  if (snippets.length === 0) {
+  if (summary.snippets.length === 0) {
     console.log("- none");
-    return;
+    return summary;
   }
 
-  for (const snippet of snippets) {
+  for (const snippet of summary.snippets) {
     console.log(`- ${snippet}`);
   }
 
-  if (!json && rawText) {
-    console.log(`[TRACE] RAW_${toolName.toUpperCase()}: ${truncateForTrace(rawText, 1000)}`);
+  if (!summary.hasStructuredJson && summary.rawText) {
+    console.log(
+      `[TRACE] RAW_${toolName.toUpperCase()}: ${truncateForTrace(summary.rawText, 1000)}`,
+    );
   }
+
+  return summary;
 }
 
 type ToolWithExecute = {
@@ -912,6 +971,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
 
 function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
   tools: TOOLS,
+  retrievalAuditCollector?: ReturnType<typeof createRetrievalAuditCollector>,
 ): TOOLS {
   return Object.fromEntries(
     Object.entries(tools).map(([toolName, tool]) => {
@@ -925,7 +985,11 @@ function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
           toolName === "get_page_content" ||
           toolName === "get_document_structure"
         ) {
-          traceRetrieval(toolName, args[0], result);
+          const summary = traceRetrieval(toolName, args[0], result);
+
+          if (retrievalAuditCollector) {
+            retrievalAuditCollector.recordToolResult(toolName, summary);
+          }
         }
 
         return result;
@@ -1009,16 +1073,44 @@ export async function POST(request: Request) {
   const {
     messages,
     selectedScope: rawSelectedScope,
+    chatId: rawChatId,
   }: {
     messages: ChatMessage[];
     selectedScope?: ContractScope;
+    chatId?: string;
   } = await request.json();
+
+  const chatSession = await resolveChatSession(rawChatId);
+
+  if (chatSession.kind === "unauthorized") {
+    console.error("[chat] request:unauthorized", chatSession.error);
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (chatSession.kind === "forbidden") {
+    console.error(
+      `[chat] request:forbidden-chat user=${chatSession.userId} chatId=${chatSession.chatId}`,
+    );
+    return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const sessionContext = chatSession.context;
+  const { userId, chatId } = sessionContext;
   const selectedScope = parseContractScope(rawSelectedScope);
   const scopedMessages = filterMessagesForScope(messages, selectedScope);
   const systemPrompt = buildSystemPrompt(selectedScope);
+  const latestUserMessage = getLatestUserMessage(messages);
+  const retrievalAuditCollector = createRetrievalAuditCollector(
+    selectedScope,
+    latestUserMessage ? getUiMessageText(latestUserMessage) : "",
+  );
+
+  await persistUserTurnIfNeeded(sessionContext, latestUserMessage);
 
   console.log(
-    `[chat] request:start messages=${messages.length} scopedMessages=${scopedMessages.length} scope=${selectedScope}`,
+    `[chat] request:start messages=${messages.length} scopedMessages=${scopedMessages.length} scope=${selectedScope}` +
+      (userId ? ` user=${userId}` : "") +
+      (chatId ? ` chatId=${chatId}` : ""),
   );
 
   const mcp = await createMCPClient({
@@ -1042,6 +1134,7 @@ export async function POST(request: Request) {
     ) as typeof tools;
     const chatTools = withTraceLogging(
       withScopedRetrieval(filteredTools, selectedScope),
+      retrievalAuditCollector,
     );
 
     console.log(
@@ -1124,8 +1217,18 @@ export async function POST(request: Request) {
     return createUIMessageStreamResponse({
       stream: createUIMessageStream<ChatMessage>({
         originalMessages: messages,
-        onFinish: ({ responseMessage }) => {
+        onFinish: async ({ responseMessage }) => {
           console.log(`[TRACE] FINAL_ANSWER:\n${getUiMessageText(responseMessage)}`);
+
+          try {
+            await persistAssistantTurnWithAuditIfNeeded(
+              sessionContext,
+              responseMessage,
+              retrievalAuditCollector.toRecord(),
+            );
+          } catch (error) {
+            console.error("[chat] persist:assistant:error", error);
+          }
         },
         execute: async ({ writer }) => {
           const retrievalState = {

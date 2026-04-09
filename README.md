@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Contract Chatbot
 
-## Getting Started
+This is a Next.js 16 App Router project for contract-scoped, PageIndex-grounded chat over stunt performer agreements. The answer path remains document-grounded through PageIndex MCP tools. Supabase is used only for auth, chat persistence, and diagnostics.
 
-First, run the development server:
+## Local Setup
+Required env vars are expected in `.env.local` and in Vercel:
+
+```bash
+DEEPSEEK_API_KEY=
+PI_API=
+ENABLE_AUTH=false
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+```
+
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` is also supported as a fallback if the publishable key is not present.
+`ENABLE_AUTH=false` keeps the app in its original anonymous mode. Set `ENABLE_AUTH=true` to activate Supabase auth gating and chat persistence.
+
+Apply the initial Supabase schema before using persistence:
+
+```sql
+\i supabase/migrations/20260409_initial_chat_auth.sql
+```
+
+## Development
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- When `ENABLE_AUTH=false`, the app behaves like the original anonymous chat UI.
+- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where Supabase email magic-link sign-in is used to create a session.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Validation
+Before submitting changes, run:
 
-## Learn More
+```bash
+npm run lint
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+Manual checks:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- confirm `/` does not redirect and `/api/chat` remains anonymous when `ENABLE_AUTH=false`
+- confirm `/login` and magic-link auth only matter when `ENABLE_AUTH=true`
+- confirm `/` redirects to `/login` and `/api/chat` returns `401` when signed out and `ENABLE_AUTH=true`
+- confirm `/api/health/supabase` reports connectivity and authenticated table access
+- confirm chat history survives a page refresh after sending messages
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Structure
+Relevant paths:
 
-## Deploy on Vercel
+- `src/app/chat-client.tsx`: authenticated client chat UI
+- `src/app/page.tsx`: server page that either renders anonymous chat or loads the current user's persisted chat
+- `src/app/api/chat/route.ts`: PageIndex-grounded chat route with optional auth and persistence wrapping
+- `src/app/login/page.tsx`: Supabase email sign-in
+- `src/lib/chat-persistence.ts`: single-thread chat persistence helpers
+- `proxy.ts`: page-level auth/session gate
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Notes
+- Retrieval architecture and scope enforcement remain server-owned in `src/app/api/chat/route.ts` and `src/app/contracts.ts`.
+- Supabase is not queried as a retrieval source.
+- The live answer path still depends on PageIndex MCP and DeepSeek only.
+- Auth and persistence stay dormant until `ENABLE_AUTH=true`.

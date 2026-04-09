@@ -3,11 +3,18 @@
 ## Project Structure & Module Organization
 This is a small Next.js 16 App Router project. Application code lives under `src/app/`.
 
-- `src/app/page.tsx`: main UI entry point
+- `src/app/page.tsx`: server page entry point and authenticated thread loader
+- `src/app/chat-client.tsx`: thin chat UI client
 - `src/app/layout.tsx`: shared app shell
 - `src/app/globals.css`: global styles
 - `src/app/contracts.ts`: local contract content/helpers
 - `src/app/api/chat/route.ts`: chat API route and retrieval logic
+- `src/app/api/health/supabase/route.ts`: Supabase connectivity health check
+- `src/app/login/page.tsx`: login entry point when auth is enabled
+- `src/app/auth/callback/route.ts`: Supabase auth callback
+- `src/lib/chat-session.ts`: auth/session/thread resolution and turn-persistence orchestration
+- `src/lib/chat-persistence.ts`: low-level chat and audit persistence helpers
+- `src/lib/retrieval-audit.ts`: retrieval audit collection helpers
 - `public/`: static assets such as SVGs
 - `docs/`: local reference material used during retrieval work
 - Root config: `next.config.ts`, `tsconfig.json`, `eslint.config.mjs`, `postcss.config.mjs`
@@ -18,7 +25,7 @@ There is currently no dedicated `test/` or `__tests__/` directory.
 
 ## Protected Architecture Rules
 
-See `ARCHITECTURE.md` for the full system design. The rules below define which parts of that design are protected from silent change.
+See `architecture.md` for the full system design. The rules below define which parts of that design are protected from silent change.
 
 ### 1. Scope enforcement is server-owned
 - Contract scope isolation must be enforced in `src/app/api/chat/route.ts`, not delegated to prompt wording or client-side logic.
@@ -56,11 +63,12 @@ See `ARCHITECTURE.md` for the full system design. The rules below define which p
 - Do not reintroduce cross-scope conversational memory within a chat session unless explicitly approved.
 
 ### 6. UI is presentation, not policy
-- `src/app/page.tsx` should remain a thin UI layer responsible for:
+- `src/app/chat-client.tsx` should remain a thin UI layer responsible for:
   - scope selection
   - rendering messages
   - rendering retrieval status
   - submitting chat requests
+- `src/app/page.tsx` should remain a server entry point responsible for rendering the anonymous flow or loading authenticated thread state before rendering the client UI.
 - Do not embed retrieval policy, document permission rules, or safety-critical filtering into the UI.
 
 ### 7. Preserve document-grounded answer behavior
@@ -70,14 +78,16 @@ See `ARCHITECTURE.md` for the full system design. The rules below define which p
 
 ### 8. No silent architecture expansion
 The repository currently has:
-- no database
-- no auth
-- no persistence layer
+- optional Supabase-backed auth behind `ENABLE_AUTH`
+- a database-backed persistence layer for `chat_threads`, `chat_messages`, and retrieval audit records
 - no analytics store
 - no background jobs/queues
-- no cross-session memory
+- no hidden secondary retrieval or answer source
+- no broader cross-session memory beyond the persisted same-thread chat history already reused under the existing same-scope rules
 
-Do not add any of the above without explicit approval. If proposed, call it out as an architectural expansion, not a routine refactor.
+Supabase must not become a retrieval source, and retrieval audit records must remain metadata-only rather than a new answer-generation memory source.
+
+Do not add new databases, new auth providers, analytics stores, background jobs/queues, hidden answer sources, or broader memory semantics without explicit approval. If proposed, call it out as an architectural expansion, not a routine refactor.
 
 ### 9. Stable user-visible retrieval feedback
 - Preserve the transient retrieval-status mechanism that allows the UI to show live retrieval activity such as “Retrieving contract content...”.
