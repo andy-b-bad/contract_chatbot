@@ -136,7 +136,7 @@ export function ChatClient({
           </h1>
           <p className="text-sm text-zinc-600">
             Contract-Scoped Retrieval-Augmented Chat Interface: Clause-Level
-            Contract Intelligence for Stunt Perfromers in Film & TV
+            Contract Intelligence for Stunt Performers in Film & TV
           </p>
         </div>
 
