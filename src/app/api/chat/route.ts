@@ -30,6 +30,8 @@ import {
   persistUserTurnIfNeeded,
   resolveChatSession,
 } from "@/lib/chat-session";
+import { buildExcerptPacket } from "@/lib/audit/excerpt-packet";
+import { mapUsageAndCost } from "@/lib/audit/usage-cost";
 import {
   createRetrievalAuditCollector,
   type RetrievalAuditTraceData,
@@ -985,10 +987,15 @@ function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
           toolName === "get_page_content" ||
           toolName === "get_document_structure"
         ) {
+          const excerptPacket = buildExcerptPacket(args[0], result, toolName);
           const summary = traceRetrieval(toolName, args[0], result);
 
           if (retrievalAuditCollector) {
-            retrievalAuditCollector.recordToolResult(toolName, summary);
+            retrievalAuditCollector.recordToolResult(
+              toolName,
+              summary,
+              excerptPacket,
+            );
           }
         }
 
@@ -1206,7 +1213,8 @@ export async function POST(request: Request) {
               : ""),
         );
       },
-      onFinish: async () => {
+      onFinish: async (event) => {
+        retrievalAuditCollector.setUsageFields(mapUsageAndCost(event));
         console.log("[chat] streamText:onFinish");
         await mcp.close();
         console.log("[chat] mcp:closed");

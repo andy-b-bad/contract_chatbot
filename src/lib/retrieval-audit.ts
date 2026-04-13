@@ -1,9 +1,12 @@
+import type { ExcerptPacketJson } from "@/lib/audit/excerpt-packet";
+import type { UsageCostFields } from "@/lib/audit/usage-cost";
 import type { ContractScope } from "@/app/contracts";
 import type { RetrievalAuditRecord } from "@/lib/chat-persistence";
 
 const MAX_RETRIEVAL_AUDIT_VALUES = 24;
 const MAX_RETRIEVAL_AUDIT_SNIPPETS = 8;
 const MAX_RETRIEVAL_AUDIT_QUERY_LENGTH = 1000;
+const MAX_RETRIEVAL_AUDIT_EXCERPTS = 8;
 
 export type RetrievalAuditTraceData = {
   documentNames: string[];
@@ -16,6 +19,8 @@ type RetrievalAuditState = {
   documentNames: string[];
   pageRefs: string[];
   traceSnippets: string[];
+  excerptPacket: ExcerptPacketJson;
+  usage: UsageCostFields;
 };
 
 function normalizeWhitespace(text: string) {
@@ -44,6 +49,24 @@ function addUniqueValues(target: string[], values: string[], maxItems: number) {
   }
 }
 
+function createDefaultUsageCostFields(): UsageCostFields {
+  return {
+    provider: null,
+    model: null,
+    providerRequestId: null,
+    providerResponseId: null,
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+    promptCacheHitTokens: null,
+    promptCacheMissTokens: null,
+    reasoningTokens: null,
+    providerUsageJson: null,
+    estimatedCostUsd: 0,
+    pricingVersion: "deepseek_v1",
+  };
+}
+
 export function createRetrievalAuditCollector(
   scope: ContractScope,
   userQueryText: string,
@@ -57,10 +80,16 @@ export function createRetrievalAuditCollector(
     documentNames: [],
     pageRefs: [],
     traceSnippets: [],
+    excerptPacket: [],
+    usage: createDefaultUsageCostFields(),
   };
 
   return {
-    recordToolResult(toolName: string, summary: RetrievalAuditTraceData) {
+    recordToolResult(
+      toolName: string,
+      summary: RetrievalAuditTraceData,
+      excerptPacket: ExcerptPacketJson = [],
+    ) {
       addUniqueValues(state.toolNames, [toolName], MAX_RETRIEVAL_AUDIT_VALUES);
       addUniqueValues(
         state.documentNames,
@@ -73,6 +102,20 @@ export function createRetrievalAuditCollector(
         summary.snippets,
         MAX_RETRIEVAL_AUDIT_SNIPPETS,
       );
+
+      for (const item of excerptPacket) {
+        if (state.excerptPacket.length >= MAX_RETRIEVAL_AUDIT_EXCERPTS) {
+          break;
+        }
+
+        state.excerptPacket.push({
+          ...item,
+          ordinal: state.excerptPacket.length,
+        });
+      }
+    },
+    setUsageFields(usageFields: UsageCostFields) {
+      state.usage = usageFields;
     },
     toRecord(): RetrievalAuditRecord {
       return {
@@ -82,6 +125,8 @@ export function createRetrievalAuditCollector(
         documentNames: [...state.documentNames],
         pageRefs: [...state.pageRefs],
         traceSnippets: [...state.traceSnippets],
+        excerptPacket: [...state.excerptPacket],
+        usage: state.usage,
       };
     },
   };
