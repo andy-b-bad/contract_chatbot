@@ -12,6 +12,8 @@ The main runtime split is:
 - auth/session and turn-persistence orchestration in `src/lib/chat-session.ts`
 - low-level chat persistence helpers in `src/lib/chat-persistence.ts`
 - retrieval audit collection in `src/lib/retrieval-audit.ts`
+- excerpt-packet shaping in `src/lib/audit/excerpt-packet.ts`
+- usage and estimated-cost mapping in `src/lib/audit/usage-cost.ts`
 - streaming chat orchestration in `src/app/api/chat/route.ts`
 
 ## Runtime Components
@@ -38,17 +40,20 @@ Supabase is used only for authentication, session cookies, per-user thread resol
 - `src/app/login/page.tsx` starts an email magic-link flow
 - `src/app/auth/callback/route.ts` exchanges the Supabase auth code for a session
 - `src/lib/chat-session.ts` resolves the authenticated user, resolves or validates the current thread, and orchestrates user-turn and assistant-turn persistence
-- `src/lib/chat-persistence.ts` performs low-level reads and writes for `chat_threads`, `chat_messages`, and retrieval audit records
+- `src/lib/chat-persistence.ts` performs low-level reads and writes for `chat_threads`, `chat_messages`, `retrieval_audits`, and `retrieval_audit_sources`
 - `src/lib/retrieval-audit.ts` collects bounded metadata from retrieval traces for later persistence with the final assistant turn
+- `src/lib/audit/excerpt-packet.ts` derives bounded excerpt packets from filtered tool results
+- `src/lib/audit/usage-cost.ts` maps model usage metadata into persisted usage and estimated-cost fields
 - `src/app/api/health/supabase/route.ts` verifies Supabase connectivity without exposing chat content
 
 When auth is enabled, the data model is still intentionally narrow:
 
 - one chat thread is resolved per signed-in user
 - user and assistant turns are persisted to `chat_messages`
-- one retrieval audit record is persisted per assistant answer and linked to the persisted assistant message and thread
+- one `retrieval_audits` row is persisted per assistant answer and linked to the persisted assistant message and thread
+- each `retrieval_audits` row can have at most one linked `retrieval_audit_sources` row storing bounded `excerpt_packet_json`
 
-Retrieval audit records are metadata only. They are for debugging and traceability, and they are not read back into retrieval or answer generation.
+`retrieval_audits` stores bounded metadata only, including selected scope, normalized user query, tool/document/page trace fields, provider/model identifiers, token-usage fields, provider usage JSON, and estimated cost. `retrieval_audit_sources` stores only bounded derived excerpt packets. These records are for debugging and traceability, and they are not read back into retrieval or answer generation.
 
 ### Contract Scope Rules
 `src/app/contracts.ts` is the app’s policy layer. It defines:
@@ -71,7 +76,7 @@ This file is the source of truth for scope parsing, document filtering, and page
 - wraps tools with scope enforcement and trace logging
 - resolves authenticated session context through `src/lib/chat-session.ts` only when auth is enabled
 - persists the latest user message before model execution only when auth is enabled
-- persists the final assistant response plus linked retrieval audit metadata after streaming completes only when auth is enabled
+- persists the final assistant response plus linked retrieval observability records after streaming completes only when auth is enabled
 - streams the final answer back to the UI
 
 The route remains the HTTP and streaming orchestration entrypoint. It does not directly own every persistence detail:
@@ -79,6 +84,8 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 - `src/lib/chat-session.ts` owns auth/session/thread resolution and turn-persistence orchestration
 - `src/lib/chat-persistence.ts` owns the low-level Supabase write primitives
 - `src/lib/retrieval-audit.ts` owns retrieval-audit state, bounds, dedupe, and conversion to a persisted audit record
+- `src/lib/audit/excerpt-packet.ts` owns bounded excerpt shaping from tool outputs
+- `src/lib/audit/usage-cost.ts` owns usage and estimated-cost normalization
 
 ## Request Lifecycle
 1. When `ENABLE_AUTH=true`, `proxy.ts` refreshes the Supabase session for `/` and redirects unauthenticated requests to `/login`.
@@ -90,9 +97,10 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 7. The route loads PageIndex MCP tools, wraps them so out-of-scope documents are rejected and shared summary page access is constrained, and attaches trace logging plus retrieval-audit collection.
 8. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path.
 9. Tool activity is mirrored into transient `retrievalStatus` data parts so the client can display “Retrieving contract content...”.
-10. Retrieval trace data is logged to the console and also accumulated as bounded audit metadata during tool execution.
+10. Retrieval trace data is logged to the console and also accumulated as bounded audit metadata during tool execution. During wrapped tool execution, bounded excerpt packets are derived from filtered tool results and added to the in-memory audit collector.
 11. The final assistant text is streamed back to the page.
-12. After streaming completes, the assistant message is persisted and, when auth is enabled, a linked retrieval audit record is persisted for that answer.
+12. In `streamText.onFinish`, usage and estimated-cost fields are captured from the model event and added to the in-memory audit collector.
+13. After the response completes, the assistant message is persisted and, when auth is enabled, a linked `retrieval_audits` row is written for that answer, followed by an optional `retrieval_audit_sources` row when bounded excerpt packets were captured.
 
 ## Retrieval Guardrails
 The main protection against hallucination is not the UI; it is the server wrapper around model/tool access.
@@ -123,8 +131,12 @@ When auth is enabled, each assistant answer can persist bounded retrieval metada
 - retrieved document names
 - retrieved page refs
 - short trace snippets
+- provider and model identifiers
+- token-usage fields and provider usage JSON
+- estimated cost
+- bounded derived excerpt packets stored separately in `retrieval_audit_sources`
 
-This audit data is intended for debugging and traceability only. It is not exposed as a retrieval source, conversation-memory source, analytics pipeline, or secondary answer path.
+This audit data is intended for debugging and traceability only. It is not exposed as a retrieval source, conversation-memory source, analytics pipeline, or secondary answer path. Excerpt packets are bounded and derived from filtered tool results, and the app does not persist raw tool payloads for retrieval observability.
 
 ## External Integrations and Configuration
 The app depends on two external services:

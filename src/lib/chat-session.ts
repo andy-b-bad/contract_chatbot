@@ -3,6 +3,7 @@ import {
   getOrCreateChatThread,
   persistChatMessage,
   persistRetrievalAudit,
+  persistRetrievalAuditSource,
   type RetrievalAuditRecord,
 } from "@/lib/chat-persistence";
 import type { ChatMessage } from "@/lib/chat";
@@ -142,11 +143,22 @@ export async function persistAssistantTurnWithAuditIfNeeded(
     return;
   }
 
-  await persistRetrievalAudit(
+  const retrievalAuditId = await persistRetrievalAudit(
     context.supabase,
     context.chatId,
     chatMessageId,
     context.userId,
     auditRecord,
+  );
+
+  if (!retrievalAuditId) {
+    return;
+  }
+
+  await persistRetrievalAuditSource(
+    context.supabase,
+    retrievalAuditId,
+    context.userId,
+    auditRecord.excerptPacket,
   );
 }
