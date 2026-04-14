@@ -1,7 +1,7 @@
 import type { ExcerptPacketJson } from "@/lib/audit/excerpt-packet";
 import type { UsageCostFields } from "@/lib/audit/usage-cost";
 import type { ContractScope } from "@/app/contracts";
-import type { RetrievalAuditRecord } from "@/lib/chat-persistence";
+import type { RetrievalAuditRecord } from "@/lib/retrieval-audit-persistence";
 
 const MAX_RETRIEVAL_AUDIT_VALUES = 24;
 const MAX_RETRIEVAL_AUDIT_SNIPPETS = 8;

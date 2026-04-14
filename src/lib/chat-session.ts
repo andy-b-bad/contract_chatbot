@@ -2,11 +2,13 @@ import {
   doesChatThreadBelongToUser,
   getOrCreateChatThread,
   persistChatMessage,
+} from "@/lib/chat-persistence";
+import type { ChatMessage } from "@/lib/chat";
+import {
   persistRetrievalAudit,
   persistRetrievalAuditSource,
   type RetrievalAuditRecord,
-} from "@/lib/chat-persistence";
-import type { ChatMessage } from "@/lib/chat";
+} from "@/lib/retrieval-audit-persistence";
 import { isAuthEnabled } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 

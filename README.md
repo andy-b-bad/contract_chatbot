@@ -22,6 +22,7 @@ Apply the Supabase schema migrations before using persistence:
 \i supabase/migrations/20260409_initial_chat_auth.sql
 \i supabase/migrations/20260409_add_retrieval_audits.sql
 \i supabase/migrations/20260413_add_audit_observability.sql
+\i supabase/migrations/20260414_rename_retrieval_audit_rating_columns.sql
 ```
 
 ## Development

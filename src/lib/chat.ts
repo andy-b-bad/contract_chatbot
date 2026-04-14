@@ -18,6 +18,8 @@ export type ChatDataParts = {
 
 export type ChatMessageMetadata = {
   scope: ContractScope;
+  hasPersistedAudit?: boolean;
+  userRating?: 1 | 2 | 3 | null;
 };
 
 export type ChatMessage = UIMessage<ChatMessageMetadata, ChatDataParts>;

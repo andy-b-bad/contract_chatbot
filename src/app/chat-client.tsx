@@ -50,7 +50,8 @@ export function ChatClient({
   );
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
-  const { messages, sendMessage, status } = useChat<ChatMessage>({
+  const [ratingMessageId, setRatingMessageId] = useState<string | null>(null);
+  const { messages, sendMessage, setMessages, status } = useChat<ChatMessage>({
     messages: initialMessages,
     transport: new DefaultChatTransport({
       api: "/api/chat",
@@ -67,6 +68,31 @@ export function ChatClient({
     },
     onFinish: () => {
       setRetrievalStatus(null);
+
+      setMessages((msgs) => {
+        if (msgs.length === 0) {
+          return msgs;
+        }
+
+        const lastIndex = msgs.length - 1;
+        const last = msgs[lastIndex];
+
+        if (last.role !== "assistant" || !last.metadata) {
+          return msgs;
+        }
+
+        const nextMessages = [...msgs];
+        nextMessages[lastIndex] = {
+          ...last,
+          metadata: {
+            ...last.metadata,
+            hasPersistedAudit: true,
+            userRating: null,
+          },
+        };
+
+        return nextMessages;
+      });
     },
     onError: () => {
       setRetrievalStatus(null);
@@ -119,6 +145,56 @@ export function ChatClient({
 
     router.replace("/login");
     router.refresh();
+  }
+
+  async function handleRateMessage(messageId: string, userRating: 1 | 2 | 3) {
+    if (!initialChatId) {
+      return;
+    }
+
+    setRatingMessageId(messageId);
+
+    try {
+      const response = await fetch("/api/chat/rating", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          chatId: initialChatId,
+          messageId,
+          userRating,
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("[chat-rating] client:request-failed", {
+          messageId,
+          status: response.status,
+        });
+        return;
+      }
+
+      setMessages((currentMessages) =>
+        currentMessages.map((message) =>
+          message.id === messageId && message.metadata
+            ? {
+                ...message,
+                metadata: {
+                  ...message.metadata,
+                  userRating,
+                },
+              }
+            : message,
+        ),
+      );
+    } catch (error) {
+      console.error("[chat-rating] client:unexpected-error", error);
+    } finally {
+      setRatingMessageId((currentMessageId) =>
+        currentMessageId === messageId ? null : currentMessageId,
+      );
+    }
   }
 
   return (
@@ -192,6 +268,13 @@ export function ChatClient({
           <>
             {messages.map((message) => {
               const text = getChatMessageText(message);
+              const showRatingControls =
+                authEnabled &&
+                Boolean(initialChatId) &&
+                message.role === "assistant" &&
+                message.metadata?.hasPersistedAudit === true;
+              const selectedUserRating = message.metadata?.userRating ?? null;
+              const isRatingMessage = ratingMessageId === message.id;
 
               if (text.length === 0) {
                 return null;
@@ -205,13 +288,46 @@ export function ChatClient({
                   }`}
                 >
                   <div
-                    className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                      message.role === "user"
-                        ? "bg-zinc-900 text-white"
-                        : "bg-zinc-100 text-zinc-900"
+                    className={`flex max-w-[85%] flex-col ${
+                      message.role === "user" ? "items-end" : "items-start"
                     }`}
                   >
-                    {text}
+                    <div
+                      className={`w-full rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                        message.role === "user"
+                          ? "bg-zinc-900 text-white"
+                          : "bg-zinc-100 text-zinc-900"
+                      }`}
+                    >
+                      {text}
+                    </div>
+                    {showRatingControls ? (
+                      <div className="mt-2 flex flex-wrap gap-2 px-1">
+                        {([
+                          [1, "Not helpful"],
+                          [2, "Partly helpful"],
+                          [3, "Helpful"],
+                        ] as const).map(([ratingValue, ratingLabel]) => {
+                          const isSelected = selectedUserRating === ratingValue;
+
+                          return (
+                            <button
+                              key={ratingValue}
+                              type="button"
+                              disabled={isRatingMessage}
+                              onClick={() => handleRateMessage(message.id, ratingValue)}
+                              className={`rounded-full border px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                                isSelected
+                                  ? "border-zinc-900 bg-zinc-900 text-white"
+                                  : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-500"
+                              }`}
+                            >
+                              {ratingValue} {ratingLabel}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );
