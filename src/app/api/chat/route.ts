@@ -82,6 +82,7 @@ Do not use general knowledge, assumptions, industry norms, or unstated interpret
 If exact wording is available, quote or closely cite it rather than broadening it.
 Use the retrieval tools normally to find relevant documents and inspect their content before answering.
 Keep the final answer concise, precise, and document-bound.
+If retrieved wording defines a closed list, answer whether the queried item appears in that list and state when it is absent.
 Never describe retrieval steps, tool usage, or your process.
 Never say "I will search", "let me check", "I found", or similar process commentary.
 Never output raw tool-call syntax, XML-like function calls, or DSML markup.
@@ -1530,7 +1531,7 @@ export async function POST(request: Request) {
     console.log("[chat] streamText:start");
     const result = streamText({
       model: deepseek("deepseek-chat"),
-      stopWhen: stepCountIs(runtimeState.queryMode === "lookup" ? 3 : 5),
+      stopWhen: stepCountIs(5),
       tools: chatTools,
       system: systemPrompt,
       messages: modelMessages,
