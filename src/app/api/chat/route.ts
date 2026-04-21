@@ -3,7 +3,6 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
   createUIMessageStream,
   createUIMessageStreamResponse,
-  convertToModelMessages,
   stepCountIs,
   streamText,
   type ModelMessage,
@@ -29,8 +28,12 @@ import {
   persistAssistantTurnWithAuditIfNeeded,
   persistUserTurnIfNeeded,
   resolveChatSession,
+  type ChatSessionContext,
 } from "@/lib/chat-session";
-import { buildExcerptPacket } from "@/lib/audit/excerpt-packet";
+import {
+  buildExcerptPacket,
+  type ExcerptPacketItem,
+} from "@/lib/audit/excerpt-packet";
 import { mapUsageAndCost } from "@/lib/audit/usage-cost";
 import {
   createRetrievalAuditCollector,
@@ -59,57 +62,32 @@ const RETRIEVAL_TOOL_NAMES = new Set([
   "get_document_structure",
   "get_page_content",
 ]);
+const MAX_SEARCH_RESULT_LIMIT = 4;
+const MAX_CARRIED_HISTORY_MESSAGES = 4;
+const MAX_CARRIED_HISTORY_TEXT_LENGTH = 220;
+const MAX_MODEL_EVIDENCE_ITEMS = 4;
+const MAX_MODEL_EVIDENCE_OVERFLOW_ITEMS = 1;
+const MAX_SUMMARY_EVIDENCE_TEXT_LENGTH = 350;
+const MAX_CONTRACT_EVIDENCE_TEXT_LENGTH = 500;
+const OUT_OF_SCOPE_RESPONSE =
+  "I can only answer questions about the provided documents.";
+const INSUFFICIENT_EVIDENCE_RESPONSE =
+  "I cannot find this information in the provided documents.";
+const SERVICE_UNAVAILABLE_RESPONSE =
+  "I could not complete retrieval because the document or model service timed out. Please try again.";
 
 const BASE_SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
-
-You ONLY answer using the provided documents and previously retrieved document content in this conversation.
-You MUST NOT use general knowledge, assumptions, likely interpretations, industry norms, or outside facts.
-If the documents do not explicitly support the answer, you must refuse.
-
-Decision order:
-1. If the user asks something clearly unrelated to the provided documents or asks for general world knowledge, reply with exactly:
-"I can only answer questions about the provided documents."
-2. If the question could be about a contract, policy, clause, payment term, notice period, leave, overtime, rate, entitlement, obligation, definition, formula, or other document topic, treat it as potentially in scope and check the documents before refusing.
-3. If the answer is already explicitly supported by previously retrieved document content in the conversation, answer directly from that content and do NOT call any tools.
-4. Otherwise, use the available retrieval tools to find the minimum evidence needed.
-5. If the first retrieval is insufficient, you may make at most one more targeted retrieval.
-6. If the answer is still not explicitly stated or directly calculable from retrieved wording, reply with exactly:
-"I cannot find this information in the provided documents."
-
-Grounding rules:
-- Retrieval-first: do not answer a document question before you have explicit supporting text.
-- Evidence-only: every factual statement in the answer must be traceable to retrieved document wording.
-- No guessing: do not infer missing meanings, fill gaps, or answer from common contract knowledge.
-- No paraphrase drift: if the document gives exact wording, quote or closely cite that wording instead of replacing it with a looser summary.
-- If the documents are ambiguous, partial, or silent on the exact point asked, refuse with the required fallback sentence.
-- If a value can be directly transformed from retrieved wording, perform only that minimal transformation and nothing more.
-
-Behaviour:
-- Respond in English.
-- Never describe what you are doing.
-- Never say things like "I will search", "let me check", or "I found".
-- Only output the final answer.
-- Keep answers concise, precise, and document-bound.
-- Follow the user's instructions exactly.
-- Never invent document names. Only use exact document names returned by the tools.
-- Reuse previously retrieved information whenever it is sufficient.
-- Do not perform additional searches if the answer can already be given from existing evidence.
-- As soon as you have enough evidence, stop and answer.
-
-Tool strategy:
-- For a simple factual document question, prefer the shortest path to the exact clause or wording.
-- After finding a relevant document, go straight to the relevant content if possible.
-- Do not call get_document_structure unless the question requires document organisation or you genuinely need structure to locate the answer.
-
-Answer style:
-- Give the answer in 1-3 sentences where possible.
-- When available, include the exact quoted wording or a brief clause/page reference.
-- Prefer exact wording over summary when the document text directly answers the question.
-- For a straightforward lookup that is explicitly answered by a summary table or rate card line, answer from that line alone and do not add nearby definitions, neighbouring clauses, or extra context unless the user asks for it.
-- Do not broaden the answer beyond what the documents say.
-- Do not prefix the answer with phrases like "Based on the retrieved document" or similar process commentary.
-- Preserve requested formats exactly. If the user asks for a fraction, output only a plain ASCII fraction in a/b form rather than a percentage, decimal, or mixed numeral.
-- When re-expressing an already known value, transform the retrieved value directly instead of searching again.`;
+Answer only from the provided documents retrieved through the available tools and the latest user turn.
+Do not use general knowledge, assumptions, industry norms, or unstated interpretations.
+If exact wording is available, quote or closely cite it rather than broadening it.
+Use the retrieval tools normally to find relevant documents and inspect their content before answering.
+Keep the final answer concise, precise, and document-bound.
+Never describe retrieval steps, tool usage, or your process.
+Never say "I will search", "let me check", "I found", or similar process commentary.
+Never output raw tool-call syntax, XML-like function calls, or DSML markup.
+Only output the final answer.
+If the user asks for general world knowledge or something clearly unrelated to the provided documents, reply with exactly: "${OUT_OF_SCOPE_RESPONSE}".
+If the retrieved document content does not explicitly support the answer, reply with exactly: "${INSUFFICIENT_EVIDENCE_RESPONSE}".`;
 
 function extractToolText(result: unknown) {
   if (
@@ -165,6 +143,14 @@ function safeJsonStringify(value: unknown) {
   }
 }
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 function getModelMessageText(message: ModelMessage) {
   const content = message.content;
 
@@ -215,26 +201,55 @@ type NamedDocument = {
   [key: string]: unknown;
 };
 
-function buildSystemPrompt(selectedScope: ContractScope) {
+type ModelEvidenceItem = {
+  provenance: "summary" | "contract";
+  document_name: string;
+  page_ref: string;
+  excerpt_text: string;
+  requested_pages: string | null;
+};
+
+type RouteRuntimeState = {
+  latestUserText: string;
+  queryMode: QueryMode;
+  searchResultCount: number;
+  pageContentFetchCount: number;
+  priorHistoryIncluded: boolean;
+  carriedHistoryCount: number;
+  carriedHistoryChars: number;
+  evidenceItemsBeforeDedupe: number;
+  evidenceItemsAfterDedupe: number;
+  evidenceChars: number;
+};
+
+type QueryMode = "lookup" | "structure";
+
+function truncateForPacket(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
   const scopeOption = getContractScopeOption(selectedScope);
   const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
+  const modeGuidance =
+    queryMode === "lookup"
+      ? "This is a simple lookup turn. Use search and page content; do not use document structure."
+      : "This turn may need document structure or navigation; use structure only when it helps locate relevant page content.";
 
   return `${BASE_SYSTEM_PROMPT}
 
 Selected contract scope: ${scopeOption.label}.
-
-Scope rules:
-- The selected contract scope is authoritative for this request.
-- You may use ${scopeOption.label} documents and shared summary documents only.
-- Shared summary documents apply to every scope.
-- For straightforward rates, definitions, payments, overtime, holiday, travel, or similar lookup questions, prefer a shared summary document first when it explicitly answers the question.
-- For shared summary documents in this scope, only use pages ${sharedSummaryPages}.
-- Do NOT call get_document_structure on a shared summary document.
-- If you use a shared summary document, call get_page_content directly with pages "${sharedSummaryPages}" or a subrange within it.
-- Only consult the full agreement when the shared summary document does not explicitly answer, or when the user clearly needs fuller contractual wording.
-- Do NOT answer from a different contract scope.
-- Only reuse previously retrieved content if it comes from the same selected scope or a shared summary document.
-- Do not add content from adjacent pages or neighbouring contract sections in the shared summary document.`;
+Use ${scopeOption.label} documents and shared summary documents only.
+Shared summary documents apply to every scope, but in this scope only pages ${sharedSummaryPages} are allowed.
+Do not call get_document_structure on a shared summary document.
+Do not call get_document_structure for simple rate, overtime, holiday, travel, payment, or definition lookups.
+If recent history is present, use it only to resolve references in the latest user turn.
+When a search returns relevant documents, use get_page_content to inspect the actual document text before answering.
+${modeGuidance}`;
 }
 
 function createToolTextResult(payload: unknown) {
@@ -246,6 +261,155 @@ function createToolTextResult(payload: unknown) {
       },
     ],
   };
+}
+
+function createTextModelMessage(
+  role: "assistant" | "user",
+  content: string,
+): ModelMessage {
+  return {
+    role,
+    content,
+  };
+}
+
+function isObviousOutOfScopeQuery(query: string) {
+  const normalizedQuery = normalizeWhitespace(query).toLowerCase();
+
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  const contractPattern =
+    /\b(contract|clause|agreement|rate|night rate|overtime|holiday|public holiday|travel|resident location|payment|leave|entitlement|definition|call|performer|stunt|cinema|tv|svod|bbc|itv|commercial|mocap)\b/;
+
+  if (contractPattern.test(normalizedQuery)) {
+    return false;
+  }
+
+  const obviousOutOfScopePatterns = [
+    /\bweather\b/,
+    /\btemperature\b/,
+    /\bcapital of\b/,
+    /\bnews\b/,
+    /\bwho won\b/,
+    /\bjoke\b/,
+    /\brecipe\b/,
+    /\bmovie recommendation\b/,
+    /\btime in\b/,
+    /\bstock price\b/,
+  ];
+
+  if (obviousOutOfScopePatterns.some((pattern) => pattern.test(normalizedQuery))) {
+    return true;
+  }
+
+  return /^(hi|hello|hey|yo)[\s!.?]*$/.test(normalizedQuery);
+}
+
+function getQueryMode(query: string): QueryMode {
+  const normalizedQuery = normalizeWhitespace(query).toLowerCase();
+
+  if (!normalizedQuery) {
+    return "lookup";
+  }
+
+  const structurePattern =
+    /\b(structure|outline|table of contents|contents|section list|clause list|all clauses|where in the agreement|where does it say|which section|which clause|document organisation|document organization|navigate|navigation)\b/;
+
+  if (structurePattern.test(normalizedQuery)) {
+    return "structure";
+  }
+
+  return "lookup";
+}
+
+function isReferentialFollowUp(query: string) {
+  const normalizedQuery = normalizeWhitespace(query).toLowerCase();
+
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  const referentialPatterns = [
+    /\bwhat about\b/,
+    /^\band\b/,
+    /\binstead\b/,
+    /\bdoes that\b/,
+    /\bdoes this\b/,
+    /\bchange for\b/,
+    /\bthat\b/,
+    /\bthose\b/,
+    /\bthese\b/,
+  ];
+
+  return referentialPatterns.some((pattern) => pattern.test(normalizedQuery));
+}
+
+function getLatestUserMessageIndex(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function buildScopedModelMessages(
+  messages: ChatMessage[],
+  runtimeState: RouteRuntimeState,
+) {
+  const latestUserIndex = getLatestUserMessageIndex(messages);
+
+  if (latestUserIndex === -1) {
+    return [] as ModelMessage[];
+  }
+
+  const latestUserText = normalizeWhitespace(getUiMessageText(messages[latestUserIndex]));
+  runtimeState.latestUserText = latestUserText;
+  const referentialFollowUp = isReferentialFollowUp(latestUserText);
+  const priorMessages = referentialFollowUp
+    ? messages
+        .slice(0, latestUserIndex)
+        .filter(
+          (message) =>
+            (message.role === "assistant" || message.role === "user") &&
+            normalizeWhitespace(getUiMessageText(message)).length > 0,
+        )
+        .slice(-MAX_CARRIED_HISTORY_MESSAGES)
+        .map((message) => ({
+          role: message.role,
+          text: truncateForPacket(
+            normalizeWhitespace(getUiMessageText(message)),
+            MAX_CARRIED_HISTORY_TEXT_LENGTH,
+          ),
+        }))
+    : [];
+
+  runtimeState.priorHistoryIncluded = priorMessages.length > 0;
+  runtimeState.carriedHistoryCount = priorMessages.length;
+  runtimeState.carriedHistoryChars = priorMessages.reduce(
+    (total, message) => total + message.text.length,
+    0,
+  );
+
+  const modelMessages: ModelMessage[] = [];
+
+  if (priorMessages.length > 0) {
+    modelMessages.push(
+      createTextModelMessage(
+        "assistant",
+        `04_recent_history\nUse this only to resolve references in the latest user turn.\n${priorMessages
+          .map((message) => `- ${message.role}: ${message.text}`)
+          .join("\n")}`,
+      ),
+    );
+  }
+
+  modelMessages.push(createTextModelMessage("user", latestUserText));
+
+  return modelMessages;
 }
 
 function getRequestedDocumentName(input: unknown) {
@@ -288,6 +452,96 @@ function getRequestedPages(input: unknown) {
   return undefined;
 }
 
+function getCompactExcerptText(item: ExcerptPacketItem) {
+  const maxLength = isSharedSummaryDocumentName(item.document_name)
+    ? MAX_SUMMARY_EVIDENCE_TEXT_LENGTH
+    : MAX_CONTRACT_EVIDENCE_TEXT_LENGTH;
+
+  return truncateForPacket(normalizeWhitespace(item.excerpt_text), maxLength);
+}
+
+function buildCompactEvidenceItems(excerptPacket: ExcerptPacketItem[]) {
+  const normalizedItems = excerptPacket
+    .map((item) => ({
+      provenance: isSharedSummaryDocumentName(item.document_name)
+        ? ("summary" as const)
+        : ("contract" as const),
+      document_name: item.document_name,
+      page_ref: item.page_ref,
+      excerpt_text: getCompactExcerptText(item),
+      requested_pages: item.requested_pages,
+    }))
+    .filter((item) => item.excerpt_text.length > 0);
+  const seenItemKeys = new Set<string>();
+  const seenDocPageKeys = new Map<string, number>();
+  const dedupedItems: ModelEvidenceItem[] = [];
+
+  for (const item of normalizedItems) {
+    const itemKey = [
+      item.document_name.trim().toLowerCase(),
+      item.page_ref.trim().toLowerCase(),
+      item.excerpt_text.trim().toLowerCase(),
+    ].join("::");
+
+    if (seenItemKeys.has(itemKey)) {
+      continue;
+    }
+
+    seenItemKeys.add(itemKey);
+
+    const docPageKey = [
+      item.document_name.trim().toLowerCase(),
+      item.page_ref.trim().toLowerCase(),
+    ].join("::");
+    const existingIndex = seenDocPageKeys.get(docPageKey);
+
+    if (existingIndex != null) {
+      if (item.excerpt_text.length < dedupedItems[existingIndex].excerpt_text.length) {
+        dedupedItems[existingIndex] = item;
+      }
+
+      continue;
+    }
+
+    seenDocPageKeys.set(docPageKey, dedupedItems.length);
+    dedupedItems.push(item);
+  }
+
+  dedupedItems.sort((left, right) => {
+    if (left.provenance !== right.provenance) {
+      return left.provenance === "summary" ? -1 : 1;
+    }
+
+    return left.page_ref.localeCompare(right.page_ref);
+  });
+
+  const selectedItems = dedupedItems.slice(0, MAX_MODEL_EVIDENCE_ITEMS);
+
+  if (
+    selectedItems.length === MAX_MODEL_EVIDENCE_ITEMS &&
+    selectedItems.some((item) => item.provenance === "summary") &&
+    !selectedItems.some((item) => item.provenance === "contract")
+  ) {
+    const contractOverflowItem = dedupedItems
+      .slice(MAX_MODEL_EVIDENCE_ITEMS)
+      .find((item) => item.provenance === "contract");
+
+    if (contractOverflowItem && MAX_MODEL_EVIDENCE_OVERFLOW_ITEMS > 0) {
+      selectedItems.push(contractOverflowItem);
+    }
+  }
+
+  return {
+    rawCount: normalizedItems.length,
+    dedupedCount: dedupedItems.length,
+    items: selectedItems,
+    totalChars: selectedItems.reduce(
+      (total, item) => total + item.excerpt_text.length,
+      0,
+    ),
+  };
+}
+
 function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
   if (typeof input !== "object" || input === null) {
     return input;
@@ -298,8 +552,8 @@ function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
     "query" in input && typeof input.query === "string" ? input.query.trim() : "";
   const limit =
     "limit" in input && typeof input.limit === "number"
-      ? Math.max(input.limit, 12)
-      : 12;
+      ? Math.min(Math.max(input.limit, 1), MAX_SEARCH_RESULT_LIMIT)
+      : MAX_SEARCH_RESULT_LIMIT;
 
   return {
     ...input,
@@ -490,43 +744,16 @@ function filterSearchDocumentsResult(
   });
 }
 
-function parseToolDocs(result: unknown) {
+function getSearchResultCount(result: unknown) {
   const json = parseToolJson<{
     docs?: NamedDocument[];
   }>(result);
 
   if (!json || !Array.isArray(json.docs)) {
-    return null;
+    return 0;
   }
 
-  return json.docs;
-}
-
-function createFallbackSearchResult(
-  docs: NamedDocument[],
-  selectedScope: ContractScope,
-) {
-  const scopeOption = getContractScopeOption(selectedScope);
-  const sharedSummaryOption = getSharedSummaryNextStepOption(
-    docs,
-    selectedScope,
-  );
-
-  return createToolTextResult({
-    success: docs.length > 0,
-    docs,
-    search_mode: "scope_fallback_recent_documents",
-    total_returned: docs.length,
-    has_more: false,
-    selected_scope: scopeOption.label,
-    next_steps: {
-      summary: `No direct ${scopeOption.label} search match. Showing allowed recent documents instead.`,
-      options: [
-        `${docs.length} allowed document(s) are available for ${scopeOption.label}.`,
-        ...(sharedSummaryOption ? [sharedSummaryOption] : []),
-      ],
-    },
-  });
+  return json.docs.length;
 }
 
 function createOutOfScopeToolResult(
@@ -543,6 +770,21 @@ function createOutOfScopeToolResult(
     selected_scope: scopeOption.label,
     error: "The requested document is outside the selected contract scope.",
     allowed_documents: `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
+  });
+}
+
+function createToolExecutionErrorResult(toolName: string, error: unknown) {
+  return createToolTextResult({
+    success: false,
+    tool: toolName,
+    error: "PageIndex tool execution failed.",
+    message: getErrorMessage(error),
+    next_steps: {
+      summary: "The document retrieval service did not return usable content.",
+      options: [
+        `Reply with exactly: "${SERVICE_UNAVAILABLE_RESPONSE}"`,
+      ],
+    },
   });
 }
 
@@ -726,12 +968,14 @@ function normalizeWhitespace(text: string) {
 type RetrievalTraceItem = {
   id?: string | number;
   name?: string;
+  document_name?: string;
   page?: number;
   page_number?: number;
   text?: string;
   content?: string;
   snippet?: string;
   excerpt?: string;
+  excerpt_text?: string;
   page_ref?: string;
 };
 
@@ -765,7 +1009,7 @@ function buildTraceSummary(input: unknown, output: unknown): RetrievalTraceSumma
     .map((item, index) => {
       const parts = [
         item.id != null ? String(item.id) : null,
-        item.name ?? null,
+        item.document_name ?? item.name ?? null,
         item.page_ref ?? null,
         item.page != null ? `page:${item.page}` : null,
         item.page_number != null ? `page:${item.page_number}` : null,
@@ -778,7 +1022,8 @@ function buildTraceSummary(input: unknown, output: unknown): RetrievalTraceSumma
     items.length > 0
       ? items.map((item) =>
           normalizeWhitespace(
-            item.text ??
+            item.excerpt_text ??
+              item.text ??
               item.content ??
               item.snippet ??
               item.excerpt ??
@@ -794,7 +1039,7 @@ function buildTraceSummary(input: unknown, output: unknown): RetrievalTraceSumma
     new Set(
       [
         ...items
-          .map((item) => item.name?.trim())
+          .map((item) => item.document_name?.trim() ?? item.name?.trim())
           .filter((value): value is string => Boolean(value)),
         getRequestedDocumentName(input)?.trim(),
       ].filter((value): value is string => Boolean(value)),
@@ -867,97 +1112,117 @@ type ToolWithExecute = {
   execute: (...args: never[]) => unknown;
 };
 
+function updateEvidenceObservability(
+  runtimeState: RouteRuntimeState,
+  evidenceSummary: ReturnType<typeof buildCompactEvidenceItems>,
+) {
+  runtimeState.evidenceItemsBeforeDedupe = Math.max(
+    runtimeState.evidenceItemsBeforeDedupe,
+    evidenceSummary.rawCount,
+  );
+  runtimeState.evidenceItemsAfterDedupe = Math.max(
+    runtimeState.evidenceItemsAfterDedupe,
+    evidenceSummary.items.length,
+  );
+  runtimeState.evidenceChars = Math.max(
+    runtimeState.evidenceChars,
+    evidenceSummary.totalChars,
+  );
+}
+
 function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
   tools: TOOLS,
   selectedScope: ContractScope,
+  runtimeState: RouteRuntimeState,
 ): TOOLS {
   return Object.fromEntries(
     Object.entries(tools).map(([toolName, tool]) => {
       const execute = (async (...args: Parameters<typeof tool.execute>) => {
-        if (toolName === "find_relevant_documents") {
-          const scopedInput = withScopeSearchInput(args[0], selectedScope);
-          const result = await tool.execute(
-            ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
-          );
-          const filteredResult = filterSearchDocumentsResult(result, selectedScope);
-          const filteredDocs = parseToolDocs(filteredResult);
+        try {
+          if (toolName === "find_relevant_documents") {
+            const scopedInput = withScopeSearchInput(args[0], selectedScope);
+            const result = await tool.execute(
+              ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+            );
+            const filteredResult = filterSearchDocumentsResult(result, selectedScope);
+            runtimeState.searchResultCount = getSearchResultCount(filteredResult);
 
-          if (filteredDocs && filteredDocs.length > 0) {
             return filteredResult;
           }
 
-          const recentDocumentsTool = tools.recent_documents;
+          if (toolName === "recent_documents") {
+            const result = await tool.execute(...args);
 
-          if (recentDocumentsTool) {
-            const recentResult = await (
-              recentDocumentsTool.execute as (...toolArgs: unknown[]) => Promise<unknown>
-            )({ limit: 20 });
-            const recentDocs = parseToolDocs(recentResult);
+            return filterRecentDocumentsResult(result, selectedScope);
+          }
 
-            if (recentDocs) {
-              const scopedRecentDocs = decorateDocumentsForScope(
-                filterDocumentsForScope(recentDocs, selectedScope),
-                selectedScope,
-              );
+          if (
+            toolName === "get_document" ||
+            toolName === "get_page_content" ||
+            toolName === "get_document_structure"
+          ) {
+            const docName = getRequestedDocumentName(args[0]);
 
-              if (scopedRecentDocs.length > 0) {
-                return createFallbackSearchResult(
-                  scopedRecentDocs,
+            if (
+              typeof docName === "string" &&
+              !isDocumentAllowedForScope(docName, selectedScope)
+            ) {
+              return createOutOfScopeToolResult(toolName, docName, selectedScope);
+            }
+
+            if (
+              typeof docName === "string" &&
+              isSharedSummaryDocumentName(docName)
+            ) {
+              if (toolName === "get_document") {
+                return createScopedSummaryDocumentResult(docName, selectedScope);
+              }
+
+              if (toolName === "get_document_structure") {
+                return createSharedSummaryStructureBlockedResult(
+                  docName,
                   selectedScope,
                 );
               }
-            }
-          }
 
-          return filteredResult;
-        }
+              if (toolName === "get_page_content") {
+                const scopedInput = withScopedSummaryPages(args[0], selectedScope);
+                const result = await tool.execute(
+                  ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+                );
+                runtimeState.pageContentFetchCount += 1;
 
-        if (toolName === "recent_documents") {
-          const result = await tool.execute(...args);
+                const excerptPacket = buildExcerptPacket(
+                  scopedInput,
+                  result,
+                  toolName,
+                );
+                const evidenceSummary = buildCompactEvidenceItems(excerptPacket);
 
-          return filterRecentDocumentsResult(result, selectedScope);
-        }
+                updateEvidenceObservability(runtimeState, evidenceSummary);
 
-        if (
-          toolName === "get_document" ||
-          toolName === "get_page_content" ||
-          toolName === "get_document_structure"
-        ) {
-          const docName = getRequestedDocumentName(args[0]);
-
-          if (
-            typeof docName === "string" &&
-            !isDocumentAllowedForScope(docName, selectedScope)
-          ) {
-            return createOutOfScopeToolResult(toolName, docName, selectedScope);
-          }
-
-          if (
-            typeof docName === "string" &&
-            isSharedSummaryDocumentName(docName)
-          ) {
-            if (toolName === "get_document") {
-              return createScopedSummaryDocumentResult(docName, selectedScope);
-            }
-
-            if (toolName === "get_document_structure") {
-              return createSharedSummaryStructureBlockedResult(
-                docName,
-                selectedScope,
-              );
+                return result;
+              }
             }
 
             if (toolName === "get_page_content") {
-              const scopedInput = withScopedSummaryPages(args[0], selectedScope);
+              const result = await tool.execute(...args);
+              runtimeState.pageContentFetchCount += 1;
+              const excerptPacket = buildExcerptPacket(args[0], result, toolName);
+              const evidenceSummary = buildCompactEvidenceItems(excerptPacket);
 
-              return tool.execute(
-                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
-              );
+              updateEvidenceObservability(runtimeState, evidenceSummary);
+
+              return result;
             }
           }
-        }
 
-        return tool.execute(...args);
+          return tool.execute(...args);
+        } catch (error) {
+          console.error(`[chat] tool:error name=${toolName}`, error);
+
+          return createToolExecutionErrorResult(toolName, error);
+        }
       }) as typeof tool.execute;
 
       return [
@@ -1076,6 +1341,67 @@ function logToolChunk(
   );
 }
 
+function createStaticAssistantResponse(
+  originalMessages: ChatMessage[],
+  text: string,
+  selectedScope: ContractScope,
+  sessionContext: ChatSessionContext,
+  retrievalAuditCollector: ReturnType<typeof createRetrievalAuditCollector>,
+) {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream<ChatMessage>({
+      originalMessages,
+      onFinish: async ({ responseMessage }) => {
+        console.log(`[TRACE] FINAL_ANSWER:\n${getUiMessageText(responseMessage)}`);
+
+        try {
+          await persistAssistantTurnWithAuditIfNeeded(
+            sessionContext,
+            responseMessage,
+            retrievalAuditCollector.toRecord(),
+          );
+        } catch (error) {
+          console.error("[chat] persist:assistant:error", error);
+        }
+      },
+      execute: ({ writer }) => {
+        const textId = crypto.randomUUID();
+        writer.write({
+          type: "start",
+          messageMetadata: {
+            scope: selectedScope,
+          },
+        });
+        writer.write({
+          type: "message-metadata",
+          messageMetadata: {
+            scope: selectedScope,
+          },
+        });
+        writer.write({
+          type: "text-start",
+          id: textId,
+        });
+        writer.write({
+          type: "text-delta",
+          id: textId,
+          delta: text,
+        });
+        writer.write({
+          type: "text-end",
+          id: textId,
+        });
+        writer.write({
+          type: "finish",
+          messageMetadata: {
+            scope: selectedScope,
+          },
+        });
+      },
+    }),
+  });
+}
+
 export async function POST(request: Request) {
   const {
     messages,
@@ -1105,12 +1431,30 @@ export async function POST(request: Request) {
   const { userId, chatId } = sessionContext;
   const selectedScope = parseContractScope(rawSelectedScope);
   const scopedMessages = filterMessagesForScope(messages, selectedScope);
-  const systemPrompt = buildSystemPrompt(selectedScope);
   const latestUserMessage = getLatestUserMessage(messages);
   const retrievalAuditCollector = createRetrievalAuditCollector(
     selectedScope,
     latestUserMessage ? getUiMessageText(latestUserMessage) : "",
   );
+  const runtimeState: RouteRuntimeState = {
+    latestUserText: latestUserMessage
+      ? normalizeWhitespace(getUiMessageText(latestUserMessage))
+      : "",
+    queryMode: latestUserMessage
+      ? getQueryMode(getUiMessageText(latestUserMessage))
+      : "lookup",
+    searchResultCount: 0,
+    pageContentFetchCount: 0,
+    priorHistoryIncluded: false,
+    carriedHistoryCount: 0,
+    carriedHistoryChars: 0,
+    evidenceItemsBeforeDedupe: 0,
+    evidenceItemsAfterDedupe: 0,
+    evidenceChars: 0,
+  };
+  const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
+  runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
+  const systemPrompt = buildSystemPrompt(selectedScope, runtimeState.queryMode);
 
   await persistUserTurnIfNeeded(sessionContext, latestUserMessage);
 
@@ -1119,6 +1463,24 @@ export async function POST(request: Request) {
       (userId ? ` user=${userId}` : "") +
       (chatId ? ` chatId=${chatId}` : ""),
   );
+  console.log(
+    `[chat] context historyIncluded=${runtimeState.priorHistoryIncluded}` +
+      ` carriedHistoryCount=${runtimeState.carriedHistoryCount}` +
+      ` carriedHistoryChars=${runtimeState.carriedHistoryChars}` +
+      ` queryMode=${runtimeState.queryMode}`,
+  );
+
+  if (isObviousOutOfScopeQuery(runtimeState.latestUserText)) {
+    console.log("[chat] request:early-out-of-scope");
+
+    return createStaticAssistantResponse(
+      messages,
+      OUT_OF_SCOPE_RESPONSE,
+      selectedScope,
+      sessionContext,
+      retrievalAuditCollector,
+    );
+  }
 
   const mcp = await createMCPClient({
     transport: {
@@ -1140,7 +1502,7 @@ export async function POST(request: Request) {
       ),
     ) as typeof tools;
     const chatTools = withTraceLogging(
-      withScopedRetrieval(filteredTools, selectedScope),
+      withScopedRetrieval(filteredTools, selectedScope, runtimeState),
       retrievalAuditCollector,
     );
 
@@ -1159,8 +1521,6 @@ export async function POST(request: Request) {
       >,
     );
 
-    const modelMessages = await convertToModelMessages(scopedMessages);
-
     console.log(
       `[TRACE] MODEL_CONTEXT:\n${truncateForTrace(
         formatModelContext(systemPrompt, modelMessages),
@@ -1170,11 +1530,34 @@ export async function POST(request: Request) {
     console.log("[chat] streamText:start");
     const result = streamText({
       model: deepseek("deepseek-chat"),
-      stopWhen: stepCountIs(5),
+      stopWhen: stepCountIs(runtimeState.queryMode === "lookup" ? 3 : 5),
       tools: chatTools,
       system: systemPrompt,
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
+        if (runtimeState.queryMode === "lookup") {
+          if (stepNumber === 0) {
+            return {
+              activeTools: ["find_relevant_documents"],
+              toolChoice: { type: "tool", toolName: "find_relevant_documents" },
+            };
+          }
+
+          if (
+            runtimeState.searchResultCount > 0 &&
+            runtimeState.pageContentFetchCount === 0
+          ) {
+            return {
+              activeTools: ["get_page_content"],
+              toolChoice: { type: "tool", toolName: "get_page_content" },
+            };
+          }
+
+          return {
+            activeTools: ["find_relevant_documents", "get_page_content"],
+          };
+        }
+
         if (stepNumber === 0) {
           return { toolChoice: "required" };
         }
@@ -1188,6 +1571,9 @@ export async function POST(request: Request) {
           toolCallId?: string;
           delta?: string;
         });
+      },
+      onError: ({ error }) => {
+        console.error("[chat] streamText:error", error);
       },
       onStepFinish: ({
         finishReason,
@@ -1215,6 +1601,14 @@ export async function POST(request: Request) {
       },
       onFinish: async (event) => {
         retrievalAuditCollector.setUsageFields(mapUsageAndCost(event));
+        console.log(
+          `[chat] observability historyIncluded=${runtimeState.priorHistoryIncluded}` +
+            ` evidenceBefore=${runtimeState.evidenceItemsBeforeDedupe}` +
+            ` evidenceAfter=${runtimeState.evidenceItemsAfterDedupe}` +
+            ` evidenceChars=${runtimeState.evidenceChars}` +
+            ` searchResultCount=${runtimeState.searchResultCount}` +
+            ` pageContentFetchCount=${runtimeState.pageContentFetchCount}`,
+        );
         console.log("[chat] streamText:onFinish");
         await mcp.close();
         console.log("[chat] mcp:closed");
@@ -1248,8 +1642,14 @@ export async function POST(request: Request) {
             messageMetadata: () => ({
               scope: selectedScope,
             }),
+            onError: (error) => {
+              console.error("[chat] ui-stream:error", error);
+
+              return SERVICE_UNAVAILABLE_RESPONSE;
+            },
           });
           const reader = uiStream.getReader();
+          let sawStart = false;
 
           try {
             while (true) {
@@ -1264,8 +1664,49 @@ export async function POST(request: Request) {
                 value,
                 retrievalState,
               );
+              if (value.type === "start") {
+                sawStart = true;
+              }
               writer.write(value);
             }
+          } catch (error) {
+            console.error("[chat] ui-stream:read:error", error);
+
+            if (!sawStart) {
+              writer.write({
+                type: "start",
+                messageMetadata: {
+                  scope: selectedScope,
+                },
+              });
+              writer.write({
+                type: "message-metadata",
+                messageMetadata: {
+                  scope: selectedScope,
+                },
+              });
+            }
+
+            const textId = crypto.randomUUID();
+            writer.write({
+              type: "text-start",
+              id: textId,
+            });
+            writer.write({
+              type: "text-delta",
+              id: textId,
+              delta: SERVICE_UNAVAILABLE_RESPONSE,
+            });
+            writer.write({
+              type: "text-end",
+              id: textId,
+            });
+            writer.write({
+              type: "finish",
+              messageMetadata: {
+                scope: selectedScope,
+              },
+            });
           } finally {
             if (retrievalState.active) {
               retrievalState.active = false;
