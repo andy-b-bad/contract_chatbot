@@ -1,7 +1,7 @@
 # Architecture
 
 ## Overview
-This repository is a small Next.js 16 App Router application that delivers a contract-scoped chat interface for stunt performer agreements. The app has a thin frontend, optional Supabase-backed auth, per-user chat persistence, and retrieval-audit persistence behind a feature flag, plus a single retrieval server entry point. Its core behavior remains retrieval-augmented generation: the model can answer only from contract material exposed through PageIndex MCP tools.
+This repository is a small Next.js 16 App Router application that delivers a contract-scoped chat interface for stunt performer agreements. The app has a thin frontend, optional Supabase-backed auth, per-user chat persistence, and retrieval-audit persistence behind a feature flag, plus a single chat integration endpoint. Its core behavior is PageIndex-grounded answer generation: the model can answer only from contract material exposed through PageIndex MCP tools.
 
 The main runtime split is:
 
@@ -59,14 +59,14 @@ When auth is enabled, the data model is still intentionally narrow:
 `src/app/contracts.ts` is the app’s policy layer. It defines:
 
 - allowed contract scopes such as `pact-cinema`, `bbc-tv`, and `mocap`
-- search hints used to bias retrieval toward the selected contract
+- document identity hints used to constrain eligible documents when discovery is needed, without ranking pages or changing the substantive query
 - document name hints used to allow or reject retrieved documents
 - shared summary page ranges allowed for each scope
 
 This file is the source of truth for scope parsing, document filtering, and page-range validation.
 
 ### Chat API Route
-`src/app/api/chat/route.ts` runs on the Edge runtime and owns the retrieval workflow. It:
+`src/app/api/chat/route.ts` runs on the Edge runtime and owns chat orchestration, product guardrails, PageIndex MCP integration, streaming, and observability. PageIndex remains the retrieval/navigation authority. It:
 
 - parses the incoming request and normalizes `selectedScope`
 - filters prior messages so only messages from the same scope are reused
@@ -108,7 +108,7 @@ The main protection against hallucination is not the UI; it is the server wrappe
 Key guardrails:
 
 - only a fixed set of PageIndex tools is exposed
-- search queries are rewritten with scope-specific hints
+- document discovery, when needed, is constrained to eligible scope documents without changing the substantive user query or ranking pages app-side
 - recent/search results are filtered to allowed documents only
 - shared summary documents are limited to scope-approved pages
 - `get_document_structure` is blocked for shared summary documents

@@ -64,6 +64,8 @@ Reply in the following JSON format:
 
 By integrating user or expert preferences, node search becomes more targeted and effective, leveraging both the document structure and domain-specific insights.
 
+Repo caveat for this app: Do not apply PageIndex preference-retrieval extensions in this app without explicit architectural approval. Product guardrails may constrain scope and eligible documents, but they must not introduce a database, semantic-similarity layer, or hidden answer source.
+
 ## 💬 Community & Support [Permalink for this section](https://docs.pageindex.ai/tutorials/tree-search/llm\#-community--support)
 
 Contact us if you need any advice on conducting document searches for your use case.

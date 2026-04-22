@@ -248,7 +248,7 @@ function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
     getPrimaryAgreementDocumentName(selectedScope);
   const modeGuidance =
     queryMode === "lookup"
-      ? "This is a PageIndex tree-search lookup turn. First read the selected agreement's document structure, use the tree summaries to select at most 1-3 likely sections/pages, retrieve only those targeted pages, then answer if the evidence is sufficient. If evidence is insufficient, repeat the structure-guided selection once with different targeted pages rather than broad page ranges or summary shortcuts."
+      ? "This is a PageIndex structure-guided lookup turn. Use the selected agreement's document structure and summaries to identify the most relevant nodes or sections, retrieve targeted PageIndex content for those selections, and answer only when the extracted text is sufficient. If the extracted text is insufficient, continue narrowly through PageIndex structure or refuse."
       : "This turn may need document structure or navigation; use structure only when it helps locate relevant page content.";
 
   return `${BASE_SYSTEM_PROMPT}
@@ -256,12 +256,12 @@ function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
 Selected contract scope: ${scopeOption.label}.
 Use ${scopeOption.label} documents and shared summary documents only.
 Shared summary documents apply to every scope, but in this scope only pages ${sharedSummaryPages} are allowed.
-Primary agreement document for this scope: ${primaryAgreementDocumentName ?? "unknown; use find_relevant_documents once only to identify it before structure navigation"}.
+Primary agreement document for this scope: ${primaryAgreementDocumentName ?? "unknown; use PageIndex document discovery only to identify an eligible scope document before structure navigation"}.
 Do not call get_document_structure on a shared summary document.
 Do not treat document page counts or total page metadata as relevant page numbers.
 If recent history is present, use it only to resolve references in the latest user turn.
-For contract questions, follow the PageIndex loop: get_document_structure, choose 1-3 likely nodes/pages from the tree, get_page_content for those pages, decide if sufficient, then answer or repeat narrowly.
-Do not prefer Latest_rates_and_definitions_summary.pdf for normal contract lookups; use it only if the PageIndex structure-guided evidence is insufficient or the user explicitly asks about rates summary material.
+For contract questions, use PageIndex structure first, select the most relevant nodes or sections from the tree, retrieve targeted PageIndex content, and answer only from sufficient extracted text.
+Use shared summary documents only as scoped eligible supporting material when the user asks about summary/rate-card material or when PageIndex-extracted agreement text is insufficient; do not let shared summaries replace primary agreement evidence for normal contract lookups.
 ${modeGuidance}`;
 }
 
@@ -563,12 +563,11 @@ function buildCompactEvidenceItems(excerptPacket: ExcerptPacketItem[]) {
   };
 }
 
-function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
+function withScopeSearchInput(input: unknown) {
   if (typeof input !== "object" || input === null) {
     return input;
   }
 
-  const scopeOption = getContractScopeOption(selectedScope);
   const query =
     "query" in input && typeof input.query === "string" ? input.query.trim() : "";
   const limit =
@@ -578,9 +577,7 @@ function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
 
   return {
     ...input,
-    query: query
-      ? `${query} ${scopeOption.searchHint}`
-      : scopeOption.searchHint,
+    query,
     limit,
   };
 }
@@ -1136,7 +1133,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
       const execute = (async (...args: Parameters<typeof tool.execute>) => {
         try {
           if (toolName === "find_relevant_documents") {
-            const scopedInput = withScopeSearchInput(args[0], selectedScope);
+            const scopedInput = withScopeSearchInput(args[0]);
             const result = await tool.execute(
               ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
             );

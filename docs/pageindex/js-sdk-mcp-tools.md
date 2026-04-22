@@ -13,6 +13,8 @@ If your framework supports MCP natively, you can connect to PageIndex MCP direct
 - You want to **mix PageIndex tools with other tools** in a single tool registry for your agent.
 - You need **programmatic access** to document reading, search, or folder management outside of a chat/agent context.
 
+Repo caveat for this app: Customize PageIndex tools only for product guardrails, scope/document eligibility, error handling, tracing, and bounded observability. Do not compose custom multi-step retrieval workflows that rank pages or replace PageIndex navigation.
+
 * * *
 
 ## Agentic Integration Example [Permalink for this section](https://docs.pageindex.ai/js-sdk/mcp-tools\#agentic-integration-example)
@@ -348,5 +350,4 @@ Retrieve folders, optionally filtered by parent. For full folder management (cre
 const result = await client.tools.listFolders({ parentFolderId: "root" });
 console.log(`Total folders: ${result.total}`);
 ```
-
 

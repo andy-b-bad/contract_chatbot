@@ -36,7 +36,7 @@ See `architecture.md` for the full system design. The rules below define which p
 - `src/app/contracts.ts` remains the canonical location for:
   - allowed scopes
   - scope parsing/normalization
-  - search hints
+  - document identity hints used only to validate or constrain eligible documents when PageIndex document discovery is needed
   - document allow rules
   - shared summary page-range rules
 - Do not duplicate or redefine scope-policy logic elsewhere unless explicitly approved.

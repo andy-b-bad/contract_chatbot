@@ -67,7 +67,7 @@ Relevant paths:
 - `proxy.ts`: page-level auth/session gate
 
 ## Notes
-- Retrieval architecture and scope enforcement remain server-owned in `src/app/api/chat/route.ts` and `src/app/contracts.ts`.
+- Scope enforcement and PageIndex integration remain server-owned in `src/app/api/chat/route.ts` and `src/app/contracts.ts`; document navigation and retrieval semantics remain PageIndex-led.
 - Supabase is not queried as a retrieval source.
 - Retrieval observability persists bounded audit metadata including usage, estimated cost, and excerpt packets when auth is enabled.
 - The live answer path still depends on PageIndex MCP and DeepSeek only.
