@@ -67,9 +67,15 @@ const MAX_CARRIED_HISTORY_MESSAGES = 4;
 const MAX_CARRIED_HISTORY_TEXT_LENGTH = 220;
 const MAX_MODEL_EVIDENCE_ITEMS = 4;
 const MAX_MODEL_EVIDENCE_OVERFLOW_ITEMS = 1;
-const MAX_LOOKUP_AGREEMENT_PAGE_COUNT = 3;
 const MAX_SUMMARY_EVIDENCE_TEXT_LENGTH = 350;
 const MAX_CONTRACT_EVIDENCE_TEXT_LENGTH = 500;
+const PRIMARY_AGREEMENT_DOCUMENTS: Partial<Record<ContractScope, string>> = {
+  "pact-cinema":
+    "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
+};
+const SCOPED_SUMMARY_DOCUMENT_IDS: Partial<Record<ContractScope, string>> = {
+  "pact-cinema": "pi-cmoa82pdy000001qtxhbkqkk3",
+};
 const OUT_OF_SCOPE_RESPONSE =
   "I can only answer questions about the provided documents.";
 const INSUFFICIENT_EVIDENCE_RESPONSE =
@@ -81,7 +87,7 @@ const BASE_SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audie
 Answer only from the provided documents retrieved through the available tools and the latest user turn.
 Do not use general knowledge, assumptions, industry norms, or unstated interpretations.
 If exact wording is available, quote or closely cite it rather than broadening it.
-Use the retrieval tools normally to find relevant documents and inspect their content before answering.
+Use PageIndex document structure before page content for contract lookup questions.
 Keep the final answer concise, precise, and document-bound.
 If retrieved wording defines a closed list, answer whether the queried item appears in that list and state when it is absent.
 Never describe retrieval steps, tool usage, or your process.
@@ -222,6 +228,7 @@ type RouteRuntimeState = {
   evidenceItemsBeforeDedupe: number;
   evidenceItemsAfterDedupe: number;
   evidenceChars: number;
+  primaryAgreementDocumentName: string | null;
 };
 
 type QueryMode = "lookup" | "structure";
@@ -237,9 +244,11 @@ function truncateForPacket(value: string, maxLength: number) {
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
   const scopeOption = getContractScopeOption(selectedScope);
   const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
+  const primaryAgreementDocumentName =
+    getPrimaryAgreementDocumentName(selectedScope);
   const modeGuidance =
     queryMode === "lookup"
-      ? "This is a PageIndex MCP lookup turn. Follow PageIndex tool outputs and next_steps, use the smallest relevant evidence, and answer as soon as retrieved page content directly supports the latest user turn. If the scoped shared summary document is available, use its scoped pages before broad agreement page reads. Do not call get_document_structure just to corroborate answerable page content."
+      ? "This is a PageIndex tree-search lookup turn. First read the selected agreement's document structure, use the tree summaries to select at most 1-3 likely sections/pages, retrieve only those targeted pages, then answer if the evidence is sufficient. If evidence is insufficient, repeat the structure-guided selection once with different targeted pages rather than broad page ranges or summary shortcuts."
       : "This turn may need document structure or navigation; use structure only when it helps locate relevant page content.";
 
   return `${BASE_SYSTEM_PROMPT}
@@ -247,12 +256,21 @@ function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
 Selected contract scope: ${scopeOption.label}.
 Use ${scopeOption.label} documents and shared summary documents only.
 Shared summary documents apply to every scope, but in this scope only pages ${sharedSummaryPages} are allowed.
+Primary agreement document for this scope: ${primaryAgreementDocumentName ?? "unknown; use find_relevant_documents once only to identify it before structure navigation"}.
 Do not call get_document_structure on a shared summary document.
 Do not treat document page counts or total page metadata as relevant page numbers.
 If recent history is present, use it only to resolve references in the latest user turn.
-When a search returns relevant documents, use get_page_content to inspect the actual document text before answering.
-Use get_document_structure only for explicit navigation, section, clause-location, or where-in-document questions, or when PageIndex tool guidance indicates structure is needed before page content.
+For contract questions, follow the PageIndex loop: get_document_structure, choose 1-3 likely nodes/pages from the tree, get_page_content for those pages, decide if sufficient, then answer or repeat narrowly.
+Do not prefer Latest_rates_and_definitions_summary.pdf for normal contract lookups; use it only if the PageIndex structure-guided evidence is insufficient or the user explicitly asks about rates summary material.
 ${modeGuidance}`;
+}
+
+function getPrimaryAgreementDocumentName(selectedScope: ContractScope) {
+  return PRIMARY_AGREEMENT_DOCUMENTS[selectedScope] ?? null;
+}
+
+function getScopedSummaryDocumentId(selectedScope: ContractScope) {
+  return SCOPED_SUMMARY_DOCUMENT_IDS[selectedScope] ?? null;
 }
 
 function createToolTextResult(payload: unknown) {
@@ -455,60 +473,6 @@ function getRequestedPages(input: unknown) {
   return undefined;
 }
 
-function expandRequestedPageSelection(pages: string) {
-  const selectedPages = new Set<number>();
-
-  for (const segment of pages.split(",")) {
-    const trimmedSegment = segment.trim();
-
-    if (!trimmedSegment) {
-      continue;
-    }
-
-    const rangeMatch = trimmedSegment.match(/^(\d+)\s*-\s*(\d+)$/);
-
-    if (rangeMatch) {
-      const start = Number(rangeMatch[1]);
-      const end = Number(rangeMatch[2]);
-
-      if (!Number.isInteger(start) || !Number.isInteger(end) || start > end) {
-        return null;
-      }
-
-      for (let page = start; page <= end; page += 1) {
-        selectedPages.add(page);
-      }
-
-      continue;
-    }
-
-    const page = Number(trimmedSegment);
-
-    if (!Number.isInteger(page)) {
-      return null;
-    }
-
-    selectedPages.add(page);
-  }
-
-  return [...selectedPages];
-}
-
-function isBroadAgreementPageSelection(input: unknown) {
-  const requestedPages = getRequestedPages(input);
-
-  if (typeof requestedPages !== "string") {
-    return false;
-  }
-
-  const selectedPages = expandRequestedPageSelection(requestedPages);
-
-  return (
-    Array.isArray(selectedPages) &&
-    selectedPages.length > MAX_LOOKUP_AGREEMENT_PAGE_COUNT
-  );
-}
-
 function getCompactExcerptText(item: ExcerptPacketItem) {
   const maxLength = isSharedSummaryDocumentName(item.document_name)
     ? MAX_SUMMARY_EVIDENCE_TEXT_LENGTH
@@ -621,6 +585,22 @@ function withScopeSearchInput(input: unknown, selectedScope: ContractScope) {
   };
 }
 
+function withPrimaryAgreementDocumentInput(
+  input: unknown,
+  primaryAgreementDocumentName: string,
+) {
+  if (typeof input !== "object" || input === null) {
+    return {
+      doc_name: primaryAgreementDocumentName,
+    };
+  }
+
+  return {
+    ...input,
+    doc_name: primaryAgreementDocumentName,
+  };
+}
+
 function filterDocumentsForScope<T extends NamedDocument>(
   docs: T[],
   selectedScope: ContractScope,
@@ -681,55 +661,6 @@ function decorateDocumentsForScope(
   });
 }
 
-function getSharedSummaryNextStepOption(
-  docs: NamedDocument[],
-  selectedScope: ContractScope,
-) {
-  const summaryDoc = docs.find(
-    (doc) =>
-      typeof doc.name === "string" &&
-      isSharedSummaryDocumentName(doc.name),
-  );
-
-  if (typeof summaryDoc?.name !== "string") {
-    return null;
-  }
-
-  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
-
-  return `For this selected scope, if the shared summary document is relevant, call get_page_content(doc_name: "${summaryDoc.name}", pages: "${sharedSummaryPages}") before broad agreement page reads.`;
-}
-
-function appendNextStepOption(nextSteps: unknown, option: string) {
-  if (typeof nextSteps === "object" && nextSteps !== null) {
-    const existingOptions = Array.isArray(
-      (nextSteps as { options?: unknown }).options,
-    )
-      ? (nextSteps as { options: unknown[] }).options
-      : [];
-
-    return {
-      ...nextSteps,
-      options: existingOptions.includes(option)
-        ? existingOptions
-        : [...existingOptions, option],
-    };
-  }
-
-  if (nextSteps == null) {
-    return {
-      summary: "Use scoped PageIndex document guidance.",
-      options: [option],
-    };
-  }
-
-  return {
-    summary: "Follow PageIndex next_steps and scoped document guidance.",
-    pageindex_next_steps: nextSteps,
-    options: [option],
-  };
-}
-
 function filterRecentDocumentsResult(
   result: unknown,
   selectedScope: ContractScope,
@@ -782,10 +713,6 @@ function filterSearchDocumentsResult(
   const scopeOption = getContractScopeOption(selectedScope);
   const docs = filterDocumentsForScope(json.docs, selectedScope);
   const scopedDocs = decorateDocumentsForScope(docs, selectedScope);
-  const sharedSummaryOption = getSharedSummaryNextStepOption(
-    scopedDocs,
-    selectedScope,
-  );
 
   return createToolTextResult({
     ...json,
@@ -796,9 +723,7 @@ function filterSearchDocumentsResult(
     selected_scope: scopeOption.label,
     next_steps:
       scopedDocs.length > 0
-        ? sharedSummaryOption
-          ? appendNextStepOption(json.next_steps, sharedSummaryOption)
-          : json.next_steps
+        ? json.next_steps
         : {
             summary: `No ${scopeOption.label} documents matched this search.`,
             options: [
@@ -896,32 +821,6 @@ function createSharedSummaryStructureBlockedResult(
   });
 }
 
-function createBroadAgreementPageSelectionBlockedResult(
-  docName: string,
-  pages: string | undefined,
-  selectedScope: ContractScope,
-) {
-  const scopeOption = getContractScopeOption(selectedScope);
-  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
-
-  return createToolTextResult({
-    success: false,
-    tool: "get_page_content",
-    doc_name: docName,
-    requested_pages: pages,
-    selected_scope: scopeOption.label,
-    error: "Broad agreement page reads are disabled for lookup turns.",
-    next_steps: {
-      summary:
-        "Use scoped shared summary pages first for ordinary lookup questions, or request a narrower agreement page selection from PageIndex guidance.",
-      options: [
-        `If the shared summary document is relevant, call get_page_content(doc_name: "Latest_rates_and_definitions_summary.pdf", pages: "${sharedSummaryPages}")`,
-        `For agreement content, request no more than ${MAX_LOOKUP_AGREEMENT_PAGE_COUNT} specific pages unless the user asked for document navigation or clause location.`,
-      ],
-    },
-  });
-}
-
 function withScopedSummaryPages(
   input: unknown,
   selectedScope: ContractScope,
@@ -932,16 +831,23 @@ function withScopedSummaryPages(
 
   const allowedPages = getSharedSummaryPageRange(selectedScope);
   const requestedPages = getRequestedPages(input);
+  const scopedSummaryDocumentId = getScopedSummaryDocumentId(selectedScope);
+  const summaryDocumentInput = scopedSummaryDocumentId
+    ? {
+        ...input,
+        doc_id: scopedSummaryDocumentId,
+      }
+    : input;
 
   if (
     typeof requestedPages === "string" &&
     isSharedSummaryPageSelectionAllowed(requestedPages, selectedScope)
   ) {
-    return input;
+    return summaryDocumentInput;
   }
 
   return {
-    ...input,
+    ...summaryDocumentInput,
     pages: allowedPages,
   };
 }
@@ -1251,6 +1157,22 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             toolName === "get_page_content" ||
             toolName === "get_document_structure"
           ) {
+            if (
+              toolName === "get_document_structure" &&
+              runtimeState.queryMode === "lookup" &&
+              runtimeState.primaryAgreementDocumentName
+            ) {
+              const scopedInput = withPrimaryAgreementDocumentInput(
+                args[0],
+                runtimeState.primaryAgreementDocumentName,
+              );
+              const result = await tool.execute(
+                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+              );
+
+              return result;
+            }
+
             const docName = getRequestedDocumentName(args[0]);
 
             if (
@@ -1296,18 +1218,6 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             }
 
             if (toolName === "get_page_content") {
-              if (
-                runtimeState.queryMode === "lookup" &&
-                typeof docName === "string" &&
-                isBroadAgreementPageSelection(args[0])
-              ) {
-                return createBroadAgreementPageSelectionBlockedResult(
-                  docName,
-                  getRequestedPages(args[0]),
-                  selectedScope,
-                );
-              }
-
               const result = await tool.execute(...args);
               runtimeState.pageContentFetchCount += 1;
               const excerptPacket = buildExcerptPacket(args[0], result, toolName);
@@ -1559,6 +1469,7 @@ export async function POST(request: Request) {
     evidenceItemsBeforeDedupe: 0,
     evidenceItemsAfterDedupe: 0,
     evidenceChars: 0,
+    primaryAgreementDocumentName: getPrimaryAgreementDocumentName(selectedScope),
   };
   const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
   runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
@@ -1644,6 +1555,13 @@ export async function POST(request: Request) {
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (runtimeState.queryMode === "lookup") {
+          if (stepNumber === 0 && runtimeState.primaryAgreementDocumentName) {
+            return {
+              activeTools: ["get_document_structure"],
+              toolChoice: { type: "tool", toolName: "get_document_structure" },
+            };
+          }
+
           if (stepNumber === 0) {
             return {
               activeTools: ["find_relevant_documents"],
@@ -1651,9 +1569,15 @@ export async function POST(request: Request) {
             };
           }
 
+          if (stepNumber === 1 && !runtimeState.primaryAgreementDocumentName) {
+            return {
+              activeTools: ["get_document_structure"],
+              toolChoice: { type: "tool", toolName: "get_document_structure" },
+            };
+          }
+
           return {
             activeTools: [
-              "find_relevant_documents",
               "get_document_structure",
               "get_page_content",
             ],
