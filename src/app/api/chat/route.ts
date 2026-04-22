@@ -238,7 +238,7 @@ function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
   const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
   const modeGuidance =
     queryMode === "lookup"
-      ? "This is a simple lookup turn. Use search and page content; do not use document structure."
+      ? "This is a lookup turn. Use search first; if search returns only document-level matches and no clear pages, use structure on scoped agreement documents to locate the right pages before reading page content."
       : "This turn may need document structure or navigation; use structure only when it helps locate relevant page content.";
 
   return `${BASE_SYSTEM_PROMPT}
@@ -247,7 +247,7 @@ Selected contract scope: ${scopeOption.label}.
 Use ${scopeOption.label} documents and shared summary documents only.
 Shared summary documents apply to every scope, but in this scope only pages ${sharedSummaryPages} are allowed.
 Do not call get_document_structure on a shared summary document.
-Do not call get_document_structure for simple rate, overtime, holiday, travel, payment, or definition lookups.
+Do not treat document page counts or total page metadata as relevant page numbers.
 If recent history is present, use it only to resolve references in the latest user turn.
 When a search returns relevant documents, use get_page_content to inspect the actual document text before answering.
 ${modeGuidance}`;
@@ -305,7 +305,7 @@ function isObviousOutOfScopeQuery(query: string) {
     return true;
   }
 
-  return /^(hi|hello|hey|yo)[\s!.?]*$/.test(normalizedQuery);
+  return /^(hi|hello|hey|yo)\b[\w\s,!.?'-]*$/.test(normalizedQuery);
 }
 
 function getQueryMode(query: string): QueryMode {
@@ -569,8 +569,7 @@ function filterDocumentsForScope<T extends NamedDocument>(
   docs: T[],
   selectedScope: ContractScope,
 ) {
-  const summaryDocs: T[] = [];
-  const scopeDocs: T[] = [];
+  const scopedDocs: T[] = [];
   const seenNames = new Set<string>();
 
   for (const doc of docs) {
@@ -590,15 +589,10 @@ function filterDocumentsForScope<T extends NamedDocument>(
     }
 
     seenNames.add(normalizedName);
-
-    if (isSharedSummaryDocumentName(docName)) {
-      summaryDocs.push(doc);
-    } else {
-      scopeDocs.push(doc);
-    }
+    scopedDocs.push(doc);
   }
 
-  return [...summaryDocs, ...scopeDocs];
+  return scopedDocs;
 }
 
 function decorateDocumentsForScope(
@@ -608,18 +602,42 @@ function decorateDocumentsForScope(
   const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
 
   return docs.map((doc) => {
+    const decoratedDoc =
+      typeof doc.pageNum === "number"
+        ? {
+            ...doc,
+            pageNum: undefined,
+            total_pages: doc.pageNum,
+          }
+        : doc;
+
     if (
-      typeof doc.name === "string" &&
-      isSharedSummaryDocumentName(doc.name)
+      typeof decoratedDoc.name === "string" &&
+      isSharedSummaryDocumentName(decoratedDoc.name)
     ) {
       return {
-        ...doc,
+        ...decoratedDoc,
         shared_summary_pages: sharedSummaryPages,
       };
     }
 
-    return doc;
+    return decoratedDoc;
   });
+}
+
+function createSearchNextSteps(scopedDocs: NamedDocument[]) {
+  if (scopedDocs.length === 0) {
+    return null;
+  }
+
+  return {
+    summary: `${scopedDocs.length} allowed document(s) matched the scoped search.`,
+    options: [
+      "For shared summary documents, use get_page_content with shared_summary_pages.",
+      "For full agreement documents, use get_document_structure if the relevant page is not already clear.",
+      "Use get_page_content only with specific pages from structure or prior evidence.",
+    ],
+  };
 }
 
 function getSharedSummaryNextStepOption(
@@ -709,10 +727,6 @@ function filterSearchDocumentsResult(
   const scopeOption = getContractScopeOption(selectedScope);
   const docs = filterDocumentsForScope(json.docs, selectedScope);
   const scopedDocs = decorateDocumentsForScope(docs, selectedScope);
-  const sharedSummaryOption = getSharedSummaryNextStepOption(
-    scopedDocs,
-    selectedScope,
-  );
 
   return createToolTextResult({
     ...json,
@@ -723,19 +737,7 @@ function filterSearchDocumentsResult(
     selected_scope: scopeOption.label,
     next_steps:
       scopedDocs.length > 0
-        ? sharedSummaryOption &&
-          typeof json.next_steps === "object" &&
-          json.next_steps !== null
-          ? {
-              ...json.next_steps,
-              options: Array.isArray((json.next_steps as { options?: unknown }).options)
-                ? [
-                    ...((json.next_steps as { options: string[] }).options),
-                    sharedSummaryOption,
-                  ]
-                : [sharedSummaryOption],
-            }
-          : json.next_steps
+        ? createSearchNextSteps(scopedDocs)
         : {
             summary: `No ${scopeOption.label} documents matched this search.`,
             options: [
@@ -1544,18 +1546,12 @@ export async function POST(request: Request) {
             };
           }
 
-          if (
-            runtimeState.searchResultCount > 0 &&
-            runtimeState.pageContentFetchCount === 0
-          ) {
-            return {
-              activeTools: ["get_page_content"],
-              toolChoice: { type: "tool", toolName: "get_page_content" },
-            };
-          }
-
           return {
-            activeTools: ["find_relevant_documents", "get_page_content"],
+            activeTools: [
+              "find_relevant_documents",
+              "get_document_structure",
+              "get_page_content",
+            ],
           };
         }
 
@@ -1651,6 +1647,23 @@ export async function POST(request: Request) {
           });
           const reader = uiStream.getReader();
           let sawStart = false;
+          let assistantText = "";
+          let bufferedStepTextChunks: Parameters<typeof writer.write>[0][] = [];
+          let stepHasToolActivity = false;
+          const flushBufferedStepText = () => {
+            for (const bufferedValue of bufferedStepTextChunks) {
+              if (bufferedValue.type === "text-delta") {
+                assistantText += bufferedValue.delta;
+              }
+
+              writer.write(bufferedValue);
+            }
+
+            bufferedStepTextChunks = [];
+          };
+          const discardBufferedStepText = () => {
+            bufferedStepTextChunks = [];
+          };
 
           try {
             while (true) {
@@ -1668,6 +1681,68 @@ export async function POST(request: Request) {
               if (value.type === "start") {
                 sawStart = true;
               }
+
+              if (value.type === "start-step") {
+                bufferedStepTextChunks = [];
+                stepHasToolActivity = false;
+                writer.write(value);
+                continue;
+              }
+
+              if (value.type.startsWith("tool-")) {
+                stepHasToolActivity = true;
+              }
+
+              if (
+                value.type === "text-start" ||
+                value.type === "text-delta" ||
+                value.type === "text-end"
+              ) {
+                bufferedStepTextChunks.push(value);
+                continue;
+              }
+
+              if (value.type === "finish-step") {
+                if (stepHasToolActivity) {
+                  discardBufferedStepText();
+                } else {
+                  flushBufferedStepText();
+                }
+
+                writer.write(value);
+                continue;
+              }
+
+              if (value.type === "finish" && !stepHasToolActivity) {
+                flushBufferedStepText();
+              } else if (value.type === "finish") {
+                discardBufferedStepText();
+              }
+
+              if (
+                value.type === "finish" &&
+                normalizeWhitespace(assistantText).length === 0 &&
+                (runtimeState.searchResultCount > 0 ||
+                  runtimeState.pageContentFetchCount > 0)
+              ) {
+                const fallbackTextId = crypto.randomUUID();
+
+                writer.write({
+                  type: "text-start",
+                  id: fallbackTextId,
+                });
+                writer.write({
+                  type: "text-delta",
+                  id: fallbackTextId,
+                  delta: INSUFFICIENT_EVIDENCE_RESPONSE,
+                });
+                writer.write({
+                  type: "text-end",
+                  id: fallbackTextId,
+                });
+                assistantText = INSUFFICIENT_EVIDENCE_RESPONSE;
+              }
+
               writer.write(value);
             }
           } catch (error) {
