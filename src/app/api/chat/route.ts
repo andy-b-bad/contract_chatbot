@@ -1152,14 +1152,10 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             toolName === "get_page_content" ||
             toolName === "get_document_structure"
           ) {
-            if (
-              toolName === "get_document_structure" &&
-              runtimeState.queryMode === "lookup" &&
-              runtimeState.primaryAgreementDocumentName
-            ) {
+            if (false && runtimeState.primaryAgreementDocumentName) {
               const scopedInput = withPrimaryAgreementDocumentInput(
                 args[0],
-                runtimeState.primaryAgreementDocumentName,
+                runtimeState.primaryAgreementDocumentName!,
               );
               const result = await tool.execute(
                 ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
@@ -1550,7 +1546,7 @@ export async function POST(request: Request) {
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (runtimeState.queryMode === "lookup") {
-          if (stepNumber === 0 && runtimeState.primaryAgreementDocumentName) {
+          if (false) {
             return {
               activeTools: ["get_document_structure"],
               toolChoice: { type: "tool", toolName: "get_document_structure" },
