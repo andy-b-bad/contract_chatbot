@@ -240,27 +240,7 @@ function truncateForPacket(value: string, maxLength: number) {
 }
 
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
-  const scopeOption = getContractScopeOption(selectedScope);
-  const sharedSummaryPages = getSharedSummaryPageRange(selectedScope);
-  const primaryAgreementDocumentName =
-    getPrimaryAgreementDocumentName(selectedScope);
-  const modeGuidance =
-    queryMode === "lookup"
-      ? "This is a PageIndex structure-guided lookup turn. Use the selected agreement's document structure and summaries to identify the most relevant nodes or sections, retrieve targeted PageIndex content for those selections, and answer only when the extracted text is sufficient. If the extracted text is insufficient, continue narrowly through PageIndex structure or refuse."
-      : "This turn may need document structure or navigation; use structure only when it helps locate relevant page content.";
-
-  return `${BASE_SYSTEM_PROMPT}
-
-Selected contract scope: ${scopeOption.label}.
-Use ${scopeOption.label} documents and shared summary documents only.
-Shared summary documents apply to every scope, but in this scope only pages ${sharedSummaryPages} are allowed.
-Primary agreement document for this scope: ${primaryAgreementDocumentName ?? "unknown; use PageIndex document discovery only to identify an eligible scope document before structure navigation"}.
-Do not call get_document_structure on a shared summary document.
-Do not treat document page counts or total page metadata as relevant page numbers.
-If recent history is present, use it only to resolve references in the latest user turn.
-For contract questions, use PageIndex structure first, select the most relevant nodes or sections from the tree, retrieve targeted PageIndex content, and answer only from sufficient extracted text.
-Use shared summary documents only as scoped eligible supporting material when the user asks about summary/rate-card material or when PageIndex-extracted agreement text is insufficient; do not let shared summaries replace primary agreement evidence for normal contract lookups.
-${modeGuidance}`;
+  return BASE_SYSTEM_PROMPT;
 }
 
 function getPrimaryAgreementDocumentName(selectedScope: ContractScope) {
