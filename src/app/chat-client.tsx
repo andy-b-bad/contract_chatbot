@@ -2,8 +2,9 @@
 
 import { DefaultChatTransport, jsonSchema } from "ai";
 import { useChat } from "@ai-sdk/react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CONTRACT_SCOPE_OPTIONS,
   type ContractScope,
@@ -32,6 +33,8 @@ type ChatClientProps = {
   initialChatId: string | null;
   initialMessages: ChatMessage[];
   initialScope: ContractScope;
+  isAnonymousUser: boolean;
+  sessionUserId: string | null;
   userEmail: string | null;
 };
 
@@ -40,6 +43,8 @@ export function ChatClient({
   initialChatId,
   initialMessages,
   initialScope,
+  isAnonymousUser,
+  sessionUserId,
   userEmail,
 }: ChatClientProps) {
   const router = useRouter();
@@ -49,6 +54,7 @@ export function ChatClient({
     null,
   );
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isBootstrappingSession, setIsBootstrappingSession] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [ratingMessageId, setRatingMessageId] = useState<string | null>(null);
   const { messages, sendMessage, setMessages, status } = useChat<ChatMessage>({
@@ -100,9 +106,48 @@ export function ChatClient({
   });
 
   const isLoading = status === "submitted" || status === "streaming";
+  const canInteract = !isLoading && !isBootstrappingSession;
   const pendingAssistantLabel =
     retrievalStatus?.label ??
-    (status === "submitted" ? "Preparing response..." : null);
+    (isBootstrappingSession
+      ? "Setting up guest session..."
+      : status === "submitted"
+        ? "Preparing response..."
+        : null);
+
+  useEffect(() => {
+    if (!authEnabled || sessionUserId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function bootstrapAnonymousSession() {
+      setAuthError(null);
+      setIsBootstrappingSession(true);
+
+      const supabase = createSupabaseBrowserClient();
+      const { error } = await supabase.auth.signInAnonymously();
+
+      if (cancelled) {
+        return;
+      }
+
+      if (error) {
+        setAuthError(error.message);
+        setIsBootstrappingSession(false);
+        return;
+      }
+
+      router.refresh();
+    }
+
+    void bootstrapAnonymousSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authEnabled, router, sessionUserId]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -218,17 +263,27 @@ export function ChatClient({
 
         {authEnabled ? (
           <div className="flex items-center gap-3">
+            {isAnonymousUser ? (
+              <Link
+                href="/login"
+                className="rounded-full border border-zinc-300 px-3 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-500"
+              >
+                Sign in
+              </Link>
+            ) : null}
             {userEmail ? (
               <p className="text-sm text-zinc-500">{userEmail}</p>
             ) : null}
-            <button
-              type="button"
-              onClick={handleSignOut}
-              disabled={isSigningOut}
-              className="rounded-full border border-zinc-300 px-3 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isSigningOut ? "Signing out..." : "Sign out"}
-            </button>
+            {!isAnonymousUser && sessionUserId ? (
+              <button
+                type="button"
+                onClick={handleSignOut}
+                disabled={isSigningOut}
+                className="rounded-full border border-zinc-300 px-3 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSigningOut ? "Signing out..." : "Sign out"}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </header>
@@ -269,7 +324,7 @@ export function ChatClient({
             {messages.map((message) => {
               const text = getChatMessageText(message);
               const showRatingControls =
-                authEnabled &&
+                Boolean(sessionUserId) &&
                 Boolean(initialChatId) &&
                 message.role === "assistant" &&
                 message.metadata?.hasPersistedAudit === true;
@@ -358,14 +413,19 @@ export function ChatClient({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           placeholder="Send a message..."
+          disabled={!canInteract}
           className="flex-1 rounded-xl border border-zinc-300 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
         />
         <button
           type="submit"
-          disabled={isLoading || input.trim().length === 0}
+          disabled={!canInteract || input.trim().length === 0}
           className="rounded-xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isLoading ? "Sending..." : "Send"}
+          {isBootstrappingSession
+            ? "Starting..."
+            : isLoading
+              ? "Sending..."
+              : "Send"}
         </button>
       </form>
     </main>

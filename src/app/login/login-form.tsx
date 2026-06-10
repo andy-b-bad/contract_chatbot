@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { isAnonymousSupabaseUser } from "@/lib/supabase/user";
 
 type LoginFormProps = {
   initialError: string | null;
@@ -10,8 +11,30 @@ type LoginFormProps = {
 export function LoginForm({ initialError }: LoginFormProps) {
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(initialError);
+  const [isAnonymousUser, setIsAnonymousUser] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUser() {
+      const supabase = createSupabaseBrowserClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!cancelled) {
+        setIsAnonymousUser(isAnonymousSupabaseUser(user));
+      }
+    }
+
+    void loadUser();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -27,12 +50,16 @@ export function LoginForm({ initialError }: LoginFormProps) {
     setIsSubmitting(true);
 
     const supabase = createSupabaseBrowserClient();
-    const { error: signInError } = await supabase.auth.signInWithOtp({
-      email: trimmedEmail,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback?next=/`,
-      },
-    });
+    const { error: signInError } = isAnonymousUser
+      ? await supabase.auth.updateUser({
+          email: trimmedEmail,
+        })
+      : await supabase.auth.signInWithOtp({
+          email: trimmedEmail,
+          options: {
+            emailRedirectTo: `${window.location.origin}/auth/callback?next=/`,
+          },
+        });
 
     if (signInError) {
       setError(signInError.message);
@@ -40,7 +67,11 @@ export function LoginForm({ initialError }: LoginFormProps) {
       return;
     }
 
-    setStatusMessage("Check your email for the sign-in link.");
+    setStatusMessage(
+      isAnonymousUser
+        ? "Check your email to confirm and upgrade this guest session."
+        : "Check your email for the sign-in link.",
+    );
     setIsSubmitting(false);
   }
 
@@ -52,10 +83,12 @@ export function LoginForm({ initialError }: LoginFormProps) {
             Supabase Sign-In
           </p>
           <h1 className="text-2xl font-semibold tracking-tight">
-            Access the contract chat
+            {isAnonymousUser ? "Save this guest chat" : "Access the contract chat"}
           </h1>
           <p className="text-sm text-zinc-600">
-            Enter your email and Supabase will send you a magic link.
+            {isAnonymousUser
+              ? "Enter your email to upgrade this guest session and keep its history."
+              : "Enter your email and Supabase will send you a magic link."}
           </p>
         </header>
 
@@ -76,7 +109,11 @@ export function LoginForm({ initialError }: LoginFormProps) {
             disabled={isSubmitting || email.trim().length === 0}
             className="w-full rounded-xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {isSubmitting ? "Sending link..." : "Send magic link"}
+            {isSubmitting
+              ? "Sending link..."
+              : isAnonymousUser
+                ? "Upgrade with email"
+                : "Send magic link"}
           </button>
         </form>
 

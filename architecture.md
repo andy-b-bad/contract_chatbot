@@ -22,7 +22,7 @@ The main runtime split is:
 `src/app/layout.tsx` provides the global HTML shell and font setup. `src/app/page.tsx` is a server component that:
 
 - renders the original anonymous chat flow when `ENABLE_AUTH=false`
-- loads the authenticated user's persisted thread only when `ENABLE_AUTH=true`
+- loads the current Supabase user's persisted thread only when `ENABLE_AUTH=true`
 
 It then renders `src/app/chat-client.tsx`, which remains a thin presentation layer for:
 
@@ -36,7 +36,7 @@ The UI uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`, posting 
 ### Auth and Persistence
 Supabase is used only for authentication, session cookies, per-user thread resolution, chat persistence, retrieval audit persistence, and diagnostic/admin data. It is not a retrieval source. This integration is inactive by default and only becomes active when `ENABLE_AUTH=true`.
 
-- `proxy.ts` refreshes the Supabase session and redirects unauthenticated users only when `ENABLE_AUTH=true`
+- `proxy.ts` refreshes the Supabase session when `ENABLE_AUTH=true`, keeps `/` available for guest access, and keeps `/login` available for guest upgrade
 - `src/app/login/page.tsx` starts an email magic-link flow
 - `src/app/auth/callback/route.ts` exchanges the Supabase auth code for a session
 - `src/lib/chat-session.ts` resolves the authenticated user, resolves or validates the current thread, and orchestrates user-turn and assistant-turn persistence
@@ -48,7 +48,7 @@ Supabase is used only for authentication, session cookies, per-user thread resol
 
 When auth is enabled, the data model is still intentionally narrow:
 
-- one chat thread is resolved per signed-in user
+- one chat thread is resolved per Supabase user, including anonymous users
 - user and assistant turns are persisted to `chat_messages`
 - one `retrieval_audits` row is persisted per assistant answer and linked to the persisted assistant message and thread
 - each `retrieval_audits` row can have at most one linked `retrieval_audit_sources` row storing bounded `excerpt_packet_json`
@@ -88,11 +88,11 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 - `src/lib/audit/usage-cost.ts` owns usage and estimated-cost normalization
 
 ## Request Lifecycle
-1. When `ENABLE_AUTH=true`, `proxy.ts` refreshes the Supabase session for `/` and redirects unauthenticated requests to `/login`.
-2. `src/app/page.tsx` either renders the original anonymous chat flow or, when auth is enabled, loads the user's single persisted chat thread and messages from Supabase before rendering `src/app/chat-client.tsx`.
+1. When `ENABLE_AUTH=true`, `proxy.ts` refreshes the Supabase session for `/` and `/login` without requiring login to use the chat.
+2. `src/app/page.tsx` either renders the original anonymous chat flow or, when auth is enabled, loads the current Supabase user's single persisted chat thread and messages from Supabase before rendering `src/app/chat-client.tsx`. If there is no session yet, the client bootstraps an anonymous one.
 3. The user selects a contract scope and submits a message in the client UI.
 4. The browser sends the full message list plus `selectedScope` and, when auth is enabled, `chatId` to `POST /api/chat`.
-5. `src/lib/chat-session.ts` resolves the authenticated user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.
+5. `src/lib/chat-session.ts` resolves the current Supabase user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.
 6. The route normalizes scope, filters prior messages by scope, builds the system prompt, and persists the latest user message through `src/lib/chat-session.ts` when auth is enabled.
 7. The route loads PageIndex MCP tools, wraps them so out-of-scope documents are rejected and shared summary page access is constrained, and attaches trace logging plus retrieval-audit collection.
 8. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path.

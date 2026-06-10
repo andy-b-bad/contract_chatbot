@@ -1,10 +1,10 @@
-import { redirect } from "next/navigation";
 import { ChatClient } from "./chat-client";
 import { DEFAULT_CONTRACT_SCOPE } from "./contracts";
 import { getOrCreateChatThread, listChatMessages } from "@/lib/chat-persistence";
 import { getInitialScope } from "@/lib/chat";
 import { isAuthEnabled } from "@/lib/supabase/config";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { isAnonymousSupabaseUser } from "@/lib/supabase/user";
 
 export default async function Home() {
   const authEnabled = isAuthEnabled();
@@ -16,6 +16,8 @@ export default async function Home() {
         initialChatId={null}
         initialMessages={[]}
         initialScope={DEFAULT_CONTRACT_SCOPE}
+        isAnonymousUser={false}
+        sessionUserId={null}
         userEmail={null}
       />
     );
@@ -27,7 +29,17 @@ export default async function Home() {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    redirect("/login");
+    return (
+      <ChatClient
+        authEnabled={authEnabled}
+        initialChatId={null}
+        initialMessages={[]}
+        initialScope={DEFAULT_CONTRACT_SCOPE}
+        isAnonymousUser={false}
+        sessionUserId={null}
+        userEmail={null}
+      />
+    );
   }
 
   const chatId = await getOrCreateChatThread(supabase, user.id);
@@ -40,6 +52,8 @@ export default async function Home() {
       initialChatId={chatId}
       initialMessages={initialMessages}
       initialScope={initialScope}
+      isAnonymousUser={isAnonymousSupabaseUser(user)}
+      sessionUserId={user.id}
       userEmail={user.email ?? null}
     />
   );

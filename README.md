@@ -14,7 +14,7 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 ```
 
 `NEXT_PUBLIC_SUPABASE_ANON_KEY` is also supported as a fallback if the publishable key is not present.
-`ENABLE_AUTH=false` keeps the app in its original anonymous mode. Set `ENABLE_AUTH=true` to activate Supabase auth gating and chat persistence.
+`ENABLE_AUTH=false` keeps the app in its original anonymous mode. Set `ENABLE_AUTH=true` to activate Supabase-backed sessions and chat persistence.
 
 Apply the Supabase schema migrations before using persistence:
 
@@ -35,7 +35,7 @@ npm run dev
 Open `http://localhost:3000`.
 
 - When `ENABLE_AUTH=false`, the app behaves like the original anonymous chat UI.
-- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where Supabase email magic-link sign-in is used to create a session.
+- When `ENABLE_AUTH=true`, the app bootstraps a Supabase anonymous session for guest access and still allows `/login` for upgrading the current guest session to an email-linked account.
 
 ## Validation
 Before submitting changes, run:
@@ -48,8 +48,8 @@ npm run build
 Manual checks:
 
 - confirm `/` does not redirect and `/api/chat` remains anonymous when `ENABLE_AUTH=false`
-- confirm `/login` and magic-link auth only matter when `ENABLE_AUTH=true`
-- confirm `/` redirects to `/login` and `/api/chat` returns `401` when signed out and `ENABLE_AUTH=true`
+- confirm `/login` remains reachable when `ENABLE_AUTH=true`
+- confirm `/` stays usable, bootstraps a guest session, and persists chat history when `ENABLE_AUTH=true`
 - confirm `/api/health/supabase` reports connectivity and authenticated table access
 - confirm chat history survives a page refresh after sending messages
 

@@ -47,8 +47,8 @@ const deepseek = createDeepSeek({
 });
 
 const ALLOWED_CHAT_TOOL_NAMES = [
-  "recent_documents",
-  "find_relevant_documents",
+  "search_documents",
+  "browse_documents",
   "get_document",
   "get_document_structure",
   "get_page_content",
@@ -56,8 +56,8 @@ const ALLOWED_CHAT_TOOL_NAMES = [
 
 const RETRIEVAL_STATUS_LABEL = "Retrieving contract content...";
 const RETRIEVAL_TOOL_NAMES = new Set([
-  "recent_documents",
-  "find_relevant_documents",
+  "search_documents",
+  "browse_documents",
   "get_document",
   "get_document_structure",
   "get_page_content",
@@ -708,6 +708,36 @@ function filterSearchDocumentsResult(
   });
 }
 
+function getResolvedDocumentName(result: unknown) {
+  const json = parseToolJson<{
+    doc_name?: string;
+    name?: string;
+    docs?: NamedDocument[];
+  }>(result);
+
+  if (!json) {
+    return null;
+  }
+
+  if (typeof json.doc_name === "string" && json.doc_name.trim().length > 0) {
+    return json.doc_name.trim();
+  }
+
+  if (typeof json.name === "string" && json.name.trim().length > 0) {
+    return json.name.trim();
+  }
+
+  if (Array.isArray(json.docs)) {
+    const firstDocName = json.docs.find((doc) => typeof doc.name === "string")?.name;
+
+    if (typeof firstDocName === "string" && firstDocName.trim().length > 0) {
+      return firstDocName.trim();
+    }
+  }
+
+  return null;
+}
+
 function getSearchResultCount(result: unknown) {
   const json = parseToolJson<{
     docs?: NamedDocument[];
@@ -1110,18 +1140,23 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
     Object.entries(tools).map(([toolName, tool]) => {
       const execute = (async (...args: Parameters<typeof tool.execute>) => {
         try {
-          if (toolName === "find_relevant_documents") {
+          if (toolName === "search_documents") {
             const scopedInput = withScopeSearchInput(args[0]);
             const result = await tool.execute(
               ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
             );
             const filteredResult = filterSearchDocumentsResult(result, selectedScope);
             runtimeState.searchResultCount = getSearchResultCount(filteredResult);
+            const resolvedDocumentName = getResolvedDocumentName(filteredResult);
+
+            if (resolvedDocumentName) {
+              runtimeState.primaryAgreementDocumentName = resolvedDocumentName;
+            }
 
             return filteredResult;
           }
 
-          if (toolName === "recent_documents") {
+          if (toolName === "browse_documents") {
             const result = await tool.execute(...args);
 
             return filterRecentDocumentsResult(result, selectedScope);
@@ -1132,7 +1167,10 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             toolName === "get_page_content" ||
             toolName === "get_document_structure"
           ) {
-            if (false && runtimeState.primaryAgreementDocumentName) {
+            if (
+              toolName === "get_document_structure" &&
+              runtimeState.primaryAgreementDocumentName
+            ) {
               const scopedInput = withPrimaryAgreementDocumentInput(
                 args[0],
                 runtimeState.primaryAgreementDocumentName!,
@@ -1229,8 +1267,8 @@ function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
         const result = await tool.execute(...args);
 
         if (
-          toolName === "recent_documents" ||
-          toolName === "find_relevant_documents" ||
+          toolName === "search_documents" ||
+          toolName === "browse_documents" ||
           toolName === "get_document" ||
           toolName === "get_page_content" ||
           toolName === "get_document_structure"
@@ -1440,7 +1478,7 @@ export async function POST(request: Request) {
     evidenceItemsBeforeDedupe: 0,
     evidenceItemsAfterDedupe: 0,
     evidenceChars: 0,
-    primaryAgreementDocumentName: getPrimaryAgreementDocumentName(selectedScope),
+    primaryAgreementDocumentName: null,
   };
   const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
   runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
@@ -1495,6 +1533,22 @@ export async function POST(request: Request) {
       withScopedRetrieval(filteredTools, selectedScope, runtimeState),
       retrievalAuditCollector,
     );
+    const availableToolNames = new Set(Object.keys(chatTools));
+    const firstLookupToolName =
+      (availableToolNames.has("search_documents")
+        ? "search_documents"
+        : runtimeState.primaryAgreementDocumentName &&
+                availableToolNames.has("get_document_structure")
+              ? "get_document_structure"
+              : availableToolNames.has("get_page_content")
+                ? "get_page_content"
+                : undefined) as keyof typeof chatTools | undefined;
+    const followupLookupTools = [
+      "get_document_structure",
+      "get_page_content",
+    ].filter((toolName) => availableToolNames.has(toolName)) as Array<
+      keyof typeof chatTools
+    >;
 
     console.log(
       `[chat] request:tools-loaded count=${Object.keys(chatTools).length}`,
@@ -1519,40 +1573,39 @@ export async function POST(request: Request) {
     );
     console.log("[chat] streamText:start");
     const result = streamText({
-      model: deepseek("deepseek-chat"),
+      model: deepseek("deepseek-v4-flash"),
+      providerOptions: { deepseek: { thinking: { type: "disabled" } } },
       stopWhen: stepCountIs(5),
       tools: chatTools,
       system: systemPrompt,
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (runtimeState.queryMode === "lookup") {
-          if (false) {
+          if (stepNumber === 0 && firstLookupToolName) {
+            return {
+              activeTools: [firstLookupToolName],
+              toolChoice: { type: "tool", toolName: firstLookupToolName },
+            };
+          }
+
+          if (
+            stepNumber === 1 &&
+            runtimeState.primaryAgreementDocumentName &&
+            availableToolNames.has("get_document_structure")
+          ) {
             return {
               activeTools: ["get_document_structure"],
               toolChoice: { type: "tool", toolName: "get_document_structure" },
             };
           }
 
-          if (stepNumber === 0) {
+          if (followupLookupTools.length > 0) {
             return {
-              activeTools: ["find_relevant_documents"],
-              toolChoice: { type: "tool", toolName: "find_relevant_documents" },
+              activeTools: followupLookupTools,
             };
           }
 
-          if (stepNumber === 1 && !runtimeState.primaryAgreementDocumentName) {
-            return {
-              activeTools: ["get_document_structure"],
-              toolChoice: { type: "tool", toolName: "get_document_structure" },
-            };
-          }
-
-          return {
-            activeTools: [
-              "get_document_structure",
-              "get_page_content",
-            ],
-          };
+          return undefined;
         }
 
         if (stepNumber === 0) {

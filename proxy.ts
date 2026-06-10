@@ -5,6 +5,7 @@ import {
   getSupabasePublishableKey,
   getSupabaseUrl,
 } from "@/lib/supabase/config";
+import { isAnonymousSupabaseUser } from "@/lib/supabase/user";
 
 export async function proxy(request: NextRequest) {
   if (!isAuthEnabled()) {
@@ -46,12 +47,12 @@ export async function proxy(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (request.nextUrl.pathname === "/login" && user) {
+  if (
+    request.nextUrl.pathname === "/login" &&
+    user &&
+    !isAnonymousSupabaseUser(user)
+  ) {
     return NextResponse.redirect(new URL("/", request.url));
-  }
-
-  if (request.nextUrl.pathname === "/" && !user) {
-    return NextResponse.redirect(new URL("/login", request.url));
   }
 
   return response;
