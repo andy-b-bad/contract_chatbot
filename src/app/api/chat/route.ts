@@ -10,12 +10,16 @@ import {
   type UIMessageStreamWriter,
 } from "ai";
 import {
+  getAllowedDocumentNamesForScope,
   getContractScopeOption,
+  getPrimaryAgreementDocumentNameForScope,
   getSharedSummaryPageRange,
   isDocumentAllowedForScope,
+  isSharedSummaryDocumentForScope,
   isSharedSummaryPageSelectionAllowed,
   isSharedSummaryDocumentName,
   parseContractScope,
+  resolveDocumentForScope,
   type ContractScope,
 } from "../../contracts";
 import {
@@ -69,13 +73,6 @@ const MAX_MODEL_EVIDENCE_ITEMS = 4;
 const MAX_MODEL_EVIDENCE_OVERFLOW_ITEMS = 1;
 const MAX_SUMMARY_EVIDENCE_TEXT_LENGTH = 350;
 const MAX_CONTRACT_EVIDENCE_TEXT_LENGTH = 500;
-const PRIMARY_AGREEMENT_DOCUMENTS: Partial<Record<ContractScope, string>> = {
-  "pact-cinema":
-    "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
-};
-const SCOPED_SUMMARY_DOCUMENT_IDS: Partial<Record<ContractScope, string>> = {
-  "pact-cinema": "pi-cmoa82pdy000001qtxhbkqkk3",
-};
 const OUT_OF_SCOPE_RESPONSE =
   "I can only answer questions about the provided documents.";
 const INSUFFICIENT_EVIDENCE_RESPONSE =
@@ -226,7 +223,9 @@ type RouteRuntimeState = {
   evidenceItemsBeforeDedupe: number;
   evidenceItemsAfterDedupe: number;
   evidenceChars: number;
+  retrievalToolCallCount: number;
   primaryAgreementDocumentName: string | null;
+  pactCinemaStructurePrimed: boolean;
 };
 
 type QueryMode = "lookup" | "structure";
@@ -240,15 +239,21 @@ function truncateForPacket(value: string, maxLength: number) {
 }
 
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
-  return BASE_SYSTEM_PROMPT;
-}
+  const fixedCorpusDocumentNames = getAllowedDocumentNamesForScope(selectedScope);
+  const queryModeInstruction =
+    queryMode === "structure"
+      ? "\nFocus on document structure and clause navigation before page-level excerpts."
+      : "";
 
-function getPrimaryAgreementDocumentName(selectedScope: ContractScope) {
-  return PRIMARY_AGREEMENT_DOCUMENTS[selectedScope] ?? null;
-}
+  if (fixedCorpusDocumentNames.length === 0) {
+    return `${BASE_SYSTEM_PROMPT}${queryModeInstruction}`;
+  }
 
-function getScopedSummaryDocumentId(selectedScope: ContractScope) {
-  return SCOPED_SUMMARY_DOCUMENT_IDS[selectedScope] ?? null;
+  return `${BASE_SYSTEM_PROMPT}${queryModeInstruction}
+
+For ${getContractScopeOption(selectedScope).label}, the only permitted documents are exactly:
+- ${fixedCorpusDocumentNames.join("\n- ")}
+Never request, mention, or rely on any other filename for this scope.`;
 }
 
 function createToolTextResult(payload: unknown) {
@@ -582,6 +587,10 @@ function filterDocumentsForScope<T extends NamedDocument>(
 ) {
   const scopedDocs: T[] = [];
   const seenNames = new Set<string>();
+  const allowedDocumentNames = getAllowedDocumentNamesForScope(selectedScope);
+  const allowedDocumentOrder = new Map(
+    allowedDocumentNames.map((name, index) => [name.trim().toLowerCase(), index]),
+  );
 
   for (const doc of docs) {
     const docName = typeof doc.name === "string" ? doc.name : undefined;
@@ -601,6 +610,21 @@ function filterDocumentsForScope<T extends NamedDocument>(
 
     seenNames.add(normalizedName);
     scopedDocs.push(doc);
+  }
+
+  if (allowedDocumentOrder.size > 0) {
+    scopedDocs.sort((left, right) => {
+      const leftName =
+        typeof left.name === "string"
+          ? allowedDocumentOrder.get(left.name.trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER
+          : Number.MAX_SAFE_INTEGER;
+      const rightName =
+        typeof right.name === "string"
+          ? allowedDocumentOrder.get(right.name.trim().toLowerCase()) ?? Number.MAX_SAFE_INTEGER
+          : Number.MAX_SAFE_INTEGER;
+
+      return leftName - rightName;
+    });
   }
 
   return scopedDocs;
@@ -624,7 +648,7 @@ function decorateDocumentsForScope(
 
     if (
       typeof decoratedDoc.name === "string" &&
-      isSharedSummaryDocumentName(decoratedDoc.name)
+      isSharedSummaryDocumentForScope(decoratedDoc.name, selectedScope)
     ) {
       return {
         ...decoratedDoc,
@@ -659,7 +683,6 @@ function filterRecentDocumentsResult(
   const processingCount = docs.length - readyCount;
 
   return createToolTextResult({
-    ...json,
     docs: scopedDocs,
     ready_count: readyCount,
     processing_count: processingCount,
@@ -690,7 +713,6 @@ function filterSearchDocumentsResult(
   const scopedDocs = decorateDocumentsForScope(docs, selectedScope);
 
   return createToolTextResult({
-    ...json,
     success: scopedDocs.length > 0 ? json.success ?? true : false,
     docs: scopedDocs,
     total_returned: scopedDocs.length,
@@ -698,7 +720,9 @@ function filterSearchDocumentsResult(
     selected_scope: scopeOption.label,
     next_steps:
       scopedDocs.length > 0
-        ? json.next_steps
+        ? {
+            summary: `Use only ${scopeOption.label} documents returned in this result.`,
+          }
         : {
             summary: `No ${scopeOption.label} documents matched this search.`,
             options: [
@@ -763,7 +787,10 @@ function createOutOfScopeToolResult(
     doc_name: docName,
     selected_scope: scopeOption.label,
     error: "The requested document is outside the selected contract scope.",
-    allowed_documents: `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
+    allowed_documents:
+      getAllowedDocumentNamesForScope(selectedScope).length > 0
+        ? getAllowedDocumentNamesForScope(selectedScope)
+        : `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
   });
 }
 
@@ -829,6 +856,7 @@ function createSharedSummaryStructureBlockedResult(
 function withScopedSummaryPages(
   input: unknown,
   selectedScope: ContractScope,
+  docId?: string,
 ) {
   if (typeof input !== "object" || input === null) {
     return input;
@@ -836,11 +864,10 @@ function withScopedSummaryPages(
 
   const allowedPages = getSharedSummaryPageRange(selectedScope);
   const requestedPages = getRequestedPages(input);
-  const scopedSummaryDocumentId = getScopedSummaryDocumentId(selectedScope);
-  const summaryDocumentInput = scopedSummaryDocumentId
+  const summaryDocumentInput = docId
     ? {
         ...input,
-        doc_id: scopedSummaryDocumentId,
+        doc_id: docId,
       }
     : input;
 
@@ -855,6 +882,34 @@ function withScopedSummaryPages(
     ...summaryDocumentInput,
     pages: allowedPages,
   };
+}
+
+function withCanonicalDocumentInput(
+  input: unknown,
+  documentName: string,
+  docId?: string,
+) {
+  const baseInput =
+    typeof input === "object" && input !== null
+      ? input
+      : {};
+
+  return {
+    ...baseInput,
+    doc_name: documentName,
+    ...(docId ? { doc_id: docId } : {}),
+  };
+}
+
+function getScopedToolNames(selectedScope: ContractScope) {
+  if (selectedScope === "pact-cinema") {
+    return ALLOWED_CHAT_TOOL_NAMES.filter(
+      (toolName) =>
+        toolName !== "search_documents" && toolName !== "browse_documents",
+    );
+  }
+
+  return ALLOWED_CHAT_TOOL_NAMES;
 }
 
 function filterMessagesForScope(
@@ -1140,6 +1195,10 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
     Object.entries(tools).map(([toolName, tool]) => {
       const execute = (async (...args: Parameters<typeof tool.execute>) => {
         try {
+          if (isRetrievalToolName(toolName)) {
+            runtimeState.retrievalToolCallCount += 1;
+          }
+
           if (toolName === "search_documents") {
             const scopedInput = withScopeSearchInput(args[0]);
             const result = await tool.execute(
@@ -1169,6 +1228,8 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
           ) {
             if (
               toolName === "get_document_structure" &&
+              selectedScope === "pact-cinema" &&
+              !runtimeState.pactCinemaStructurePrimed &&
               runtimeState.primaryAgreementDocumentName
             ) {
               const scopedInput = withPrimaryAgreementDocumentInput(
@@ -1178,36 +1239,49 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
               const result = await tool.execute(
                 ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
               );
+              runtimeState.pactCinemaStructurePrimed = true;
 
               return result;
             }
 
             const docName = getRequestedDocumentName(args[0]);
 
-            if (
-              typeof docName === "string" &&
-              !isDocumentAllowedForScope(docName, selectedScope)
-            ) {
+            if (typeof docName !== "string") {
+              return tool.execute(...args);
+            }
+
+            const resolvedDocument = resolveDocumentForScope(docName, selectedScope);
+
+            if (!resolvedDocument || !isDocumentAllowedForScope(docName, selectedScope)) {
               return createOutOfScopeToolResult(toolName, docName, selectedScope);
             }
 
-            if (
-              typeof docName === "string" &&
-              isSharedSummaryDocumentName(docName)
-            ) {
+            if (resolvedDocument.kind === "shared-summary") {
               if (toolName === "get_document") {
-                return createScopedSummaryDocumentResult(docName, selectedScope);
+                return createScopedSummaryDocumentResult(
+                  resolvedDocument.documentName,
+                  selectedScope,
+                );
               }
 
               if (toolName === "get_document_structure") {
                 return createSharedSummaryStructureBlockedResult(
-                  docName,
+                  resolvedDocument.documentName,
                   selectedScope,
                 );
               }
 
               if (toolName === "get_page_content") {
-                const scopedInput = withScopedSummaryPages(args[0], selectedScope);
+                const canonicalInput = withCanonicalDocumentInput(
+                  args[0],
+                  resolvedDocument.documentName,
+                  resolvedDocument.docId,
+                );
+                const scopedInput = withScopedSummaryPages(
+                  canonicalInput,
+                  selectedScope,
+                  resolvedDocument.docId,
+                );
                 const result = await tool.execute(
                   ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
                 );
@@ -1226,16 +1300,28 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
               }
             }
 
+            const scopedInput = withCanonicalDocumentInput(
+              args[0],
+              resolvedDocument.documentName,
+              resolvedDocument.docId,
+            );
+
             if (toolName === "get_page_content") {
-              const result = await tool.execute(...args);
+              const result = await tool.execute(
+                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+              );
               runtimeState.pageContentFetchCount += 1;
-              const excerptPacket = buildExcerptPacket(args[0], result, toolName);
+              const excerptPacket = buildExcerptPacket(scopedInput, result, toolName);
               const evidenceSummary = buildCompactEvidenceItems(excerptPacket);
 
               updateEvidenceObservability(runtimeState, evidenceSummary);
 
               return result;
             }
+
+            return tool.execute(
+              ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+            );
           }
 
           return tool.execute(...args);
@@ -1478,7 +1564,10 @@ export async function POST(request: Request) {
     evidenceItemsBeforeDedupe: 0,
     evidenceItemsAfterDedupe: 0,
     evidenceChars: 0,
-    primaryAgreementDocumentName: null,
+    retrievalToolCallCount: 0,
+    primaryAgreementDocumentName:
+      getPrimaryAgreementDocumentNameForScope(selectedScope),
+    pactCinemaStructurePrimed: false,
   };
   const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
   runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
@@ -1522,12 +1611,9 @@ export async function POST(request: Request) {
 
   try {
     const tools = await mcp.tools();
+    const scopedToolNames = new Set<string>(getScopedToolNames(selectedScope));
     const filteredTools = Object.fromEntries(
-      Object.entries(tools).filter(([toolName]) =>
-        ALLOWED_CHAT_TOOL_NAMES.includes(
-          toolName as (typeof ALLOWED_CHAT_TOOL_NAMES)[number],
-        ),
-      ),
+      Object.entries(tools).filter(([toolName]) => scopedToolNames.has(toolName)),
     ) as typeof tools;
     const chatTools = withTraceLogging(
       withScopedRetrieval(filteredTools, selectedScope, runtimeState),
@@ -1535,14 +1621,17 @@ export async function POST(request: Request) {
     );
     const availableToolNames = new Set(Object.keys(chatTools));
     const firstLookupToolName =
-      (availableToolNames.has("search_documents")
-        ? "search_documents"
-        : runtimeState.primaryAgreementDocumentName &&
-                availableToolNames.has("get_document_structure")
-              ? "get_document_structure"
-              : availableToolNames.has("get_page_content")
-                ? "get_page_content"
-                : undefined) as keyof typeof chatTools | undefined;
+      (selectedScope === "pact-cinema" &&
+      availableToolNames.has("get_document_structure")
+        ? "get_document_structure"
+        : availableToolNames.has("search_documents")
+          ? "search_documents"
+          : runtimeState.primaryAgreementDocumentName &&
+                  availableToolNames.has("get_document_structure")
+                ? "get_document_structure"
+                : availableToolNames.has("get_page_content")
+                  ? "get_page_content"
+                  : undefined) as keyof typeof chatTools | undefined;
     const followupLookupTools = [
       "get_document_structure",
       "get_page_content",
@@ -1590,6 +1679,7 @@ export async function POST(request: Request) {
 
           if (
             stepNumber === 1 &&
+            selectedScope !== "pact-cinema" &&
             runtimeState.primaryAgreementDocumentName &&
             availableToolNames.has("get_document_structure")
           ) {
@@ -1781,8 +1871,7 @@ export async function POST(request: Request) {
               if (
                 value.type === "finish" &&
                 normalizeWhitespace(assistantText).length === 0 &&
-                (runtimeState.searchResultCount > 0 ||
-                  runtimeState.pageContentFetchCount > 0)
+                runtimeState.retrievalToolCallCount > 0
               ) {
                 const fallbackTextId = crypto.randomUUID();
 

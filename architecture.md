@@ -59,11 +59,12 @@ When auth is enabled, the data model is still intentionally narrow:
 `src/app/contracts.ts` is the app’s policy layer. It defines:
 
 - allowed contract scopes such as `pact-cinema`, `bbc-tv`, and `mocap`
+- fixed exact-document corpora where required
 - document identity hints used to constrain eligible documents when discovery is needed, without ranking pages or changing the substantive query
-- document name hints used to allow or reject retrieved documents
+- per-scope document metadata used to allow, reject, and canonically resolve retrieved documents
 - shared summary page ranges allowed for each scope
 
-This file is the source of truth for scope parsing, document filtering, and page-range validation.
+This file is the source of truth for scope parsing, document filtering, exact-document policy, and page-range validation.
 
 ### Chat API Route
 `src/app/api/chat/route.ts` runs on the Edge runtime and owns chat orchestration, product guardrails, PageIndex MCP integration, streaming, and observability. PageIndex remains the retrieval/navigation authority. It:
@@ -94,8 +95,8 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 4. The browser sends the full message list plus `selectedScope` and, when auth is enabled, `chatId` to `POST /api/chat`.
 5. `src/lib/chat-session.ts` resolves the current Supabase user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.
 6. The route normalizes scope, filters prior messages by scope, builds the system prompt, and persists the latest user message through `src/lib/chat-session.ts` when auth is enabled.
-7. The route loads PageIndex MCP tools, wraps them so out-of-scope documents are rejected and shared summary page access is constrained, and attaches trace logging plus retrieval-audit collection.
-8. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path.
+7. The route loads PageIndex MCP tools, filters the visible toolset by scope, wraps them so out-of-scope documents are rejected before PageIndex invocation, canonically resolves allowed document names, constrains shared summary page access, and attaches trace logging plus retrieval-audit collection.
+8. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path. For `pact-cinema`, the first retrieval step is forced to call `get_document_structure` on the exact cinema agreement document.
 9. Tool activity is mirrored into transient `retrievalStatus` data parts so the client can display “Retrieving contract content...”.
 10. Retrieval trace data is logged to the console and also accumulated as bounded audit metadata during tool execution. During wrapped tool execution, bounded excerpt packets are derived from filtered tool results and added to the in-memory audit collector.
 11. The final assistant text is streamed back to the page.
@@ -108,9 +109,15 @@ The main protection against hallucination is not the UI; it is the server wrappe
 Key guardrails:
 
 - only a fixed set of PageIndex tools is exposed
+- `pact-cinema` uses a fixed exact-document corpus of:
+  - `Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf`
+  - `PACT_Cinema_Summary.pdf`
+- `pact-cinema` does not expose `search_documents` or `browse_documents` to the model
 - document discovery, when needed, is constrained to eligible scope documents without changing the substantive user query or ranking pages app-side
 - recent/search results are filtered to allowed documents only
+- filtered discovery responses do not preserve auxiliary out-of-scope filenames
 - shared summary documents are limited to scope-approved pages
+- `PACT_Cinema_Summary.pdf` is treated as a scope-specific summary, not as a shared summary document
 - `get_document_structure` is blocked for shared summary documents
 - out-of-scope document requests return structured tool errors instead of content
 - conversation history is filtered by message scope before reuse
