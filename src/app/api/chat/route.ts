@@ -1520,6 +1520,11 @@ export async function POST(request: Request) {
     console.log("[chat] streamText:start");
     const result = streamText({
       model: deepseek("deepseek-chat"),
+      providerOptions: {
+        deepseek: {
+          thinking: { type: "disabled" },
+        },
+      },
       stopWhen: stepCountIs(5),
       tools: chatTools,
       system: systemPrompt,
