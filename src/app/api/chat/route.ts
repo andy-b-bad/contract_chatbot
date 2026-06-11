@@ -3,8 +3,10 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
   createUIMessageStream,
   createUIMessageStreamResponse,
+  jsonSchema,
   stepCountIs,
   streamText,
+  tool,
   type ModelMessage,
   type UIMessageChunk,
   type UIMessageStreamWriter,
@@ -89,6 +91,10 @@ Do not use general knowledge, assumptions, industry norms, or unstated interpret
 If exact wording is available, quote or closely cite it rather than broadening it
 Use PageIndex document structure before page content for contract lookup questions.
 Keep the final answer concise, precise, and document-bound.
+Use all material evidence supplied in the system context and retrieved through tools.
+Where different terms apply to different categories of worker, role, or engagement, state each applicable rule and clearly label who it applies to. Do not silently omit a material category-specific rule.
+Do not claim that a general provision applies unchanged to a category when a category-specific rate or rule is also provided. Present the general provision and the category-specific provision separately, without attempting to reconcile or infer precedence unless the documents explicitly do so.
+Begin directly with the answer. Never write phrases such as "let me check", "now I have the information", "based on the provided documents", or other process narration.
 If retrieved wording defines a closed list, answer whether the queried item appears in that list and state when it is absent.
 Never describe retrieval steps, tool usage, or your process.
 Only output the final answer.
@@ -1134,6 +1140,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             toolName === "get_page_content" ||
             toolName === "get_document_structure"
           ) {
+
             if (
               toolName === "get_document_structure" &&
               runtimeState.primaryAgreementDocumentName
@@ -1461,7 +1468,7 @@ export async function POST(request: Request) {
   };
   const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
   runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
-  const systemPrompt = buildSystemPrompt(selectedScope, runtimeState.queryMode);
+  let systemPrompt = buildSystemPrompt(selectedScope, runtimeState.queryMode);
 
   await persistUserTurnIfNeeded(sessionContext, latestUserMessage);
 
@@ -1513,6 +1520,73 @@ export async function POST(request: Request) {
       retrievalAuditCollector,
     );
     const availableToolNames = new Set(Object.keys(chatTools));
+
+    if (
+      selectedScope === "pact-cinema" &&
+      availableToolNames.has("get_page_content")
+    ) {
+      const summaryTool = chatTools.get_page_content;
+
+      if (summaryTool?.execute) {
+        const summaryResult = await summaryTool.execute(
+          {
+            doc_name: "PACT_Cinema_Summary.pdf",
+            doc_id: "pi-cmoa82pdy000001qtxhbkqkk3",
+            pages: "1",
+          },
+          {
+            toolCallId: "pact-cinema-summary-preload",
+            messages: modelMessages,
+          },
+        );
+
+        const summaryText = extractToolText(summaryResult);
+
+        if (summaryText.trim()) {
+          systemPrompt += `
+
+PACT Cinema stunt summary evidence:
+${summaryText}`;
+        }
+      }
+    }
+
+    const primaryAgreementPageTool =
+      runtimeState.primaryAgreementDocumentName &&
+      chatTools.get_page_content?.execute
+        ? tool({
+            description:
+              "Retrieve relevant pages from the primary Pact Cinema agreement. Choose pages using the agreement structure returned in the previous step.",
+            inputSchema: jsonSchema<{ pages: string }>({
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                pages: {
+                  type: "string",
+                  description:
+                    'Relevant agreement page or page range, for example "20" or "20-22".',
+                },
+              },
+              required: ["pages"],
+            }),
+            execute: async ({ pages }, options) =>
+              chatTools.get_page_content.execute(
+                {
+                  doc_name: runtimeState.primaryAgreementDocumentName!,
+                  pages,
+                },
+                options,
+              ),
+          })
+        : null;
+
+    const modelTools: Record<string, any> = primaryAgreementPageTool
+      ? {
+          ...chatTools,
+          get_primary_agreement_pages: primaryAgreementPageTool,
+        }
+      : chatTools;
+
     const firstLookupToolName = availableToolNames.has("get_document_structure")
       ? "get_document_structure"
       : availableToolNames.has("find_relevant_documents")
@@ -1557,21 +1631,37 @@ export async function POST(request: Request) {
         },
       },
       stopWhen: stepCountIs(5),
-      tools: chatTools,
+      tools: modelTools,
       system: systemPrompt,
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (runtimeState.queryMode === "lookup") {
-          if (stepNumber === 0 && firstLookupToolName) {
+          if (
+            stepNumber === 0 &&
+            availableToolNames.has("get_document_structure")
+          ) {
             return {
-              activeTools: [firstLookupToolName],
-              toolChoice: { type: "tool", toolName: firstLookupToolName },
+              activeTools: ["get_document_structure"],
+              toolChoice: {
+                type: "tool",
+                toolName: "get_document_structure",
+              },
             };
           }
 
-          if (followupLookupTools.length > 0) {
+          if (stepNumber === 1 && primaryAgreementPageTool) {
             return {
-              activeTools: followupLookupTools,
+              activeTools: ["get_primary_agreement_pages"],
+              toolChoice: {
+                type: "tool",
+                toolName: "get_primary_agreement_pages",
+              },
+            };
+          }
+
+          if (availableToolNames.has("get_page_content")) {
+            return {
+              activeTools: ["get_page_content"],
             };
           }
 
