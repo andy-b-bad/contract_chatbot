@@ -227,6 +227,7 @@ type RouteRuntimeState = {
   evidenceItemsAfterDedupe: number;
   evidenceChars: number;
   primaryAgreementDocumentName: string | null;
+  primaryAgreementStructureRequested: boolean;
 };
 
 type QueryMode = "lookup" | "structure";
@@ -240,7 +241,16 @@ function truncateForPacket(value: string, maxLength: number) {
 }
 
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
-  return BASE_SYSTEM_PROMPT;
+  if (selectedScope !== "pact-cinema") {
+    return BASE_SYSTEM_PROMPT;
+  }
+
+  return `${BASE_SYSTEM_PROMPT}
+
+For Pact Cinema, the only permitted documents are exactly:
+- Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf
+- PACT_Cinema_Summary.pdf
+Never request, mention, or rely on any other filename for this scope.`;
 }
 
 function getPrimaryAgreementDocumentName(selectedScope: ContractScope) {
@@ -804,25 +814,17 @@ function withScopedSummaryPages(
     return input;
   }
 
-  const allowedPages = getSharedSummaryPageRange(selectedScope);
-  const requestedPages = getRequestedPages(input);
+  const allowedPages =
+    selectedScope === "pact-cinema"
+      ? "1"
+      : getSharedSummaryPageRange(selectedScope);
   const scopedSummaryDocumentId = getScopedSummaryDocumentId(selectedScope);
-  const summaryDocumentInput = scopedSummaryDocumentId
-    ? {
-        ...input,
-        doc_id: scopedSummaryDocumentId,
-      }
-    : input;
-
-  if (
-    typeof requestedPages === "string" &&
-    isSharedSummaryPageSelectionAllowed(requestedPages, selectedScope)
-  ) {
-    return summaryDocumentInput;
-  }
 
   return {
-    ...summaryDocumentInput,
+    ...input,
+    ...(scopedSummaryDocumentId
+      ? { doc_id: scopedSummaryDocumentId }
+      : {}),
     pages: allowedPages,
   };
 }
@@ -1132,16 +1134,30 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             toolName === "get_page_content" ||
             toolName === "get_document_structure"
           ) {
-            if (false && runtimeState.primaryAgreementDocumentName) {
+            if (
+              toolName === "get_document_structure" &&
+              runtimeState.primaryAgreementDocumentName
+            ) {
+              if (runtimeState.primaryAgreementStructureRequested) {
+                return createToolTextResult({
+                  success: true,
+                  tool: "get_document_structure",
+                  doc_name: runtimeState.primaryAgreementDocumentName,
+                  message:
+                    "The primary agreement structure has already been requested for this turn. Use get_page_content for the relevant pages.",
+                });
+              }
+
+              runtimeState.primaryAgreementStructureRequested = true;
+
               const scopedInput = withPrimaryAgreementDocumentInput(
                 args[0],
-                runtimeState.primaryAgreementDocumentName!,
-              );
-              const result = await tool.execute(
-                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+                runtimeState.primaryAgreementDocumentName,
               );
 
-              return result;
+              return tool.execute(
+                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+              );
             }
 
             const docName = getRequestedDocumentName(args[0]);
@@ -1441,6 +1457,7 @@ export async function POST(request: Request) {
     evidenceItemsAfterDedupe: 0,
     evidenceChars: 0,
     primaryAgreementDocumentName: getPrimaryAgreementDocumentName(selectedScope),
+    primaryAgreementStructureRequested: false,
   };
   const modelMessages = buildScopedModelMessages(scopedMessages, runtimeState);
   runtimeState.queryMode = getQueryMode(runtimeState.latestUserText);
@@ -1495,6 +1512,20 @@ export async function POST(request: Request) {
       withScopedRetrieval(filteredTools, selectedScope, runtimeState),
       retrievalAuditCollector,
     );
+    const availableToolNames = new Set(Object.keys(chatTools));
+    const firstLookupToolName = availableToolNames.has("get_document_structure")
+      ? "get_document_structure"
+      : availableToolNames.has("find_relevant_documents")
+        ? "find_relevant_documents"
+        : availableToolNames.has("get_page_content")
+          ? "get_page_content"
+          : undefined;
+    const followupLookupTools = [
+      "get_document_structure",
+      "get_page_content",
+    ].filter((toolName) => availableToolNames.has(toolName)) as Array<
+      keyof typeof chatTools
+    >;
 
     console.log(
       `[chat] request:tools-loaded count=${Object.keys(chatTools).length}`,
@@ -1531,33 +1562,20 @@ export async function POST(request: Request) {
       messages: modelMessages,
       prepareStep: async ({ stepNumber }) => {
         if (runtimeState.queryMode === "lookup") {
-          if (false) {
+          if (stepNumber === 0 && firstLookupToolName) {
             return {
-              activeTools: ["get_document_structure"],
-              toolChoice: { type: "tool", toolName: "get_document_structure" },
+              activeTools: [firstLookupToolName],
+              toolChoice: { type: "tool", toolName: firstLookupToolName },
             };
           }
 
-          if (stepNumber === 0) {
+          if (followupLookupTools.length > 0) {
             return {
-              activeTools: ["find_relevant_documents"],
-              toolChoice: { type: "tool", toolName: "find_relevant_documents" },
+              activeTools: followupLookupTools,
             };
           }
 
-          if (stepNumber === 1 && !runtimeState.primaryAgreementDocumentName) {
-            return {
-              activeTools: ["get_document_structure"],
-              toolChoice: { type: "tool", toolName: "get_document_structure" },
-            };
-          }
-
-          return {
-            activeTools: [
-              "get_document_structure",
-              "get_page_content",
-            ],
-          };
+          return undefined;
         }
 
         if (stepNumber === 0) {
