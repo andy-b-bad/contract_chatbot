@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "pages": "1",
+  "content": [
+    {
+      "name": "PACT_Cinema_Summary.pdf",
+      "page_ref": "1",
+      "page_number": 1,
+      "content": "# Stunt Coordinators and Stunt Performers\n\n| Topic | Applicable role | Rate | Notes | Source reference |\n| --- | --- | --- | --- | --- |\n| Overtime | Stunt Coordinators and Stunt Performers | 1/7 daily/hr | Applies where overtime is payable for stunt coordinators and stunt performers under the summary rate table. | PACT Cinema Summary p.1, Overtime row |\n| Holiday | Stunt Coordinators and Stunt Performers | 1/6 weekly | Holiday pay summary row. | PACT Cinema Summary p.1, Holiday row |\n\n## Work Conditions\n\n| Item | Value | Notes | Reference |\n| --- | --- | --- | --- |\n| Night Work | See agreement | Night work terms are summarised for quick lookup. | PACT Cinema Summary p.1, Night Work row |\n| Travel | By agreement | Travel summary row unrelated to overtime. | PACT Cinema Summary p.1, Travel row |"
+    }
+  ]
+}

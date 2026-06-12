@@ -8,6 +8,7 @@ import {
   streamText,
   tool,
   type ModelMessage,
+  type ToolSet,
   type UIMessageChunk,
   type UIMessageStreamWriter,
 } from "ai";
@@ -41,6 +42,10 @@ import {
   createRetrievalAuditCollector,
   type RetrievalAuditTraceData,
 } from "@/lib/retrieval-audit";
+import {
+  createCanonicalEvidenceCollector,
+  type CanonicalEvidenceCollector,
+} from "@/lib/evidence/canonical-evidence";
 
 export const runtime = "edge";
 
@@ -1113,6 +1118,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
   tools: TOOLS,
   selectedScope: ContractScope,
   runtimeState: RouteRuntimeState,
+  canonicalEvidenceCollector: CanonicalEvidenceCollector,
 ): TOOLS {
   return Object.fromEntries(
     Object.entries(tools).map(([toolName, tool]) => {
@@ -1197,6 +1203,12 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
                   ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
                 );
                 runtimeState.pageContentFetchCount += 1;
+                canonicalEvidenceCollector.recordPageContentResult({
+                  scope: selectedScope,
+                  toolName,
+                  toolInput: scopedInput,
+                  toolResult: result,
+                });
 
                 const excerptPacket = buildExcerptPacket(
                   scopedInput,
@@ -1214,6 +1226,12 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             if (toolName === "get_page_content") {
               const result = await tool.execute(...args);
               runtimeState.pageContentFetchCount += 1;
+              canonicalEvidenceCollector.recordPageContentResult({
+                scope: selectedScope,
+                toolName,
+                toolInput: args[0],
+                toolResult: result,
+              });
               const excerptPacket = buildExcerptPacket(args[0], result, toolName);
               const evidenceSummary = buildCompactEvidenceItems(excerptPacket);
 
@@ -1448,6 +1466,7 @@ export async function POST(request: Request) {
     selectedScope,
     latestUserMessage ? getUiMessageText(latestUserMessage) : "",
   );
+  const canonicalEvidenceCollector = createCanonicalEvidenceCollector();
   const runtimeState: RouteRuntimeState = {
     latestUserText: latestUserMessage
       ? normalizeWhitespace(getUiMessageText(latestUserMessage))
@@ -1516,7 +1535,12 @@ export async function POST(request: Request) {
       ),
     ) as typeof tools;
     const chatTools = withTraceLogging(
-      withScopedRetrieval(filteredTools, selectedScope, runtimeState),
+      withScopedRetrieval(
+        filteredTools,
+        selectedScope,
+        runtimeState,
+        canonicalEvidenceCollector,
+      ),
       retrievalAuditCollector,
     );
     const availableToolNames = new Set(Object.keys(chatTools));
@@ -1580,7 +1604,7 @@ ${summaryText}`;
           })
         : null;
 
-    const modelTools: Record<string, any> = primaryAgreementPageTool
+    const modelTools: ToolSet = primaryAgreementPageTool
       ? {
           ...chatTools,
           get_primary_agreement_pages: primaryAgreementPageTool,

@@ -1,0 +1,24 @@
+{
+  "success": true,
+  "pages": "20-22",
+  "content": [
+    {
+      "name": "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
+      "page_ref": "20",
+      "page_number": 20,
+      "content": "Primary agreement page 20 fixture text."
+    },
+    {
+      "name": "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
+      "page_ref": "21",
+      "page_number": 21,
+      "content": "Primary agreement page 21 fixture text."
+    },
+    {
+      "name": "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
+      "page_ref": "22",
+      "page_number": 22,
+      "content": "Primary agreement page 22 fixture text."
+    }
+  ]
+}
