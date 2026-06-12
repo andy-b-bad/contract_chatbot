@@ -3,21 +3,7 @@
 ## Project Structure & Module Organization
 This is a small Next.js 16 App Router project. Application code lives under `src/app/`.
 
-- `src/app/page.tsx`: server page entry point and authenticated thread loader
-- `src/app/chat-client.tsx`: thin chat UI client
-- `src/app/layout.tsx`: shared app shell
-- `src/app/globals.css`: global styles
-- `src/app/contracts.ts`: local contract content/helpers
-- `src/app/api/chat/route.ts`: chat API route and retrieval logic
-- `src/app/api/health/supabase/route.ts`: Supabase connectivity health check
-- `src/app/login/page.tsx`: login entry point when auth is enabled
-- `src/app/auth/callback/route.ts`: Supabase auth callback
-- `src/lib/chat-session.ts`: auth/session/thread resolution and turn-persistence orchestration
-- `src/lib/chat-persistence.ts`: low-level chat and audit persistence helpers
-- `src/lib/retrieval-audit.ts`: retrieval audit collection helpers
-- `public/`: static assets such as SVGs
-- `docs/`: local reference material used during retrieval work
-- Root config: `next.config.ts`, `tsconfig.json`, `eslint.config.mjs`, `postcss.config.mjs`
+
 
 There is currently no dedicated `test/` or `__tests__/` directory.
 
@@ -25,7 +11,7 @@ There is currently no dedicated `test/` or `__tests__/` directory.
 
 ## Protected Architecture Rules
 
-See `architecture.md` for the full system design. The rules below define which parts of that design are protected from silent change.
+
 
 ### 1. Scope enforcement is server-owned
 - Contract scope isolation must be enforced in `src/app/api/chat/route.ts`, not delegated to prompt wording or client-side logic.
@@ -51,16 +37,7 @@ See `architecture.md` for the full system design. The rules below define which p
   - same-scope conversation filtering
   - out-of-scope rejection behavior
 
-### 4. PageIndex access must remain constrained
-- Exposed PageIndex MCP tools must stay on an explicit allow-list.
-- Broad tool exposure is not allowed by default.
-- Shared summary access must remain page-range constrained by selected scope.
-- `get_document_structure` for shared summary documents must remain blocked unless explicitly approved.
-- Out-of-scope document access must fail closed with structured errors rather than silently returning content.
 
-### 5. Same-scope conversation reuse must be preserved
-- Prior messages reused for retrieval or answer generation must be filtered to the currently selected scope.
-- Do not reintroduce cross-scope conversational memory within a chat session unless explicitly approved.
 
 ### 6. UI is presentation, not policy
 - `src/app/chat-client.tsx` should remain a thin UI layer responsible for:

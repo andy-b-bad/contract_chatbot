@@ -1,11 +1,13 @@
-type UsageLike = {
+export type UsageLike = {
   inputTokens?: number | undefined;
   inputTokenDetails?: {
     noCacheTokens?: number | undefined;
     cacheReadTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
   };
   outputTokens?: number | undefined;
   outputTokenDetails?: {
+    textTokens?: number | undefined;
     reasoningTokens?: number | undefined;
   };
   totalTokens?: number | undefined;
@@ -13,7 +15,7 @@ type UsageLike = {
   raw?: unknown;
 };
 
-type UsageAndCostSource = {
+export type UsageAndCostSource = {
   model?: {
     provider?: string | undefined;
     modelId?: string | undefined;
@@ -39,6 +41,21 @@ export type UsageCostFields = {
   providerUsageJson: unknown | null;
   estimatedCostUsd: number;
   pricingVersion: "deepseek_v1";
+};
+
+export type UsageTokenClassPresence = {
+  inputCacheWriteTokens: number | null;
+  outputTextTokens: number | null;
+  outputReasoningTokens: number | null;
+};
+
+export type ObservedCostFields = {
+  currency: "USD";
+  amount: string | null;
+  pricingVersion: string | null;
+  calculatedAt: string;
+  pricedTokenClasses: string[];
+  notSeparatelyPricedTokenClasses: string[];
 };
 
 function asNullableInteger(value: unknown) {
@@ -87,5 +104,50 @@ export function mapUsageAndCost(result: UsageAndCostSource): UsageCostFields {
       (normalizedPromptCacheMissTokens / 1_000_000) * 0.27 +
       (normalizedCompletionTokens / 1_000_000) * 1.1,
     pricingVersion: "deepseek_v1",
+  };
+}
+
+function decimalString(value: number) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  if (value === 0) {
+    return "0";
+  }
+
+  return value.toFixed(18).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+export function getObservedCostFields(
+  usageFields: UsageCostFields,
+  tokenClassPresence: UsageTokenClassPresence,
+  calculatedAt: string,
+): ObservedCostFields {
+  const pricedTokenClasses =
+    usageFields.pricingVersion === "deepseek_v1"
+      ? ["input_cache_read", "input_no_cache", "output_total"]
+      : [];
+  const notSeparatelyPricedTokenClasses: string[] = [];
+
+  if (tokenClassPresence.inputCacheWriteTokens != null) {
+    notSeparatelyPricedTokenClasses.push("input_cache_write");
+  }
+
+  if (tokenClassPresence.outputTextTokens != null) {
+    notSeparatelyPricedTokenClasses.push("output_text");
+  }
+
+  if (tokenClassPresence.outputReasoningTokens != null) {
+    notSeparatelyPricedTokenClasses.push("output_reasoning");
+  }
+
+  return {
+    currency: "USD",
+    amount: decimalString(usageFields.estimatedCostUsd),
+    pricingVersion: usageFields.pricingVersion,
+    calculatedAt,
+    pricedTokenClasses,
+    notSeparatelyPricedTokenClasses,
   };
 }

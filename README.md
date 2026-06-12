@@ -72,3 +72,13 @@ Relevant paths:
 - Retrieval observability persists bounded audit metadata including usage, estimated cost, and excerpt packets when auth is enabled.
 - The live answer path still depends on PageIndex MCP and DeepSeek only.
 - Auth and persistence stay dormant until `ENABLE_AUTH=true`.
+
+## Local Trace Capture
+Local raw answer traces are disabled unless `ENABLE_LOCAL_TRACE_CAPTURE=true`,
+`LOCAL_TRACE_CAPTURE_ALLOWED=true`, and `LOCAL_TRACE_CAPTURE_ENDPOINT` points to
+the loopback `/api/local-traces` endpoint. Use only benign local test prompts:
+raw traces preserve the user query and final answer for replayable evaluation and
+can contain user-provided content. Trace files under `.local/traces/` are
+gitignored, are not automatically promoted, and must be manually reviewed before
+becoming fixtures. Do not enable local trace capture on externally reachable
+deployments.
