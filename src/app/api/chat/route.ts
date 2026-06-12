@@ -46,6 +46,23 @@ import {
   createCanonicalEvidenceCollector,
   type CanonicalEvidenceCollector,
 } from "@/lib/evidence/canonical-evidence";
+import {
+  getAnswerValidationLogResult,
+  logAnswerValidationResult,
+  isAnswerValidationLoggingEnabled,
+  type AnswerValidationLogResult,
+} from "@/lib/evidence/answer-validation-logging";
+import {
+  buildLocalAnswerTracePayload,
+  getObservedCostForTrace,
+  mapLocalTraceUsage,
+  sanitizeTraceValue,
+  sendLocalAnswerTrace,
+  type LocalTraceToolCall,
+  type LocalTraceUsage,
+  type RawLocalAnswerTrace,
+  type RawLocalAnswerTracePayload,
+} from "@/lib/evidence/local-answer-trace";
 
 export const runtime = "edge";
 
@@ -1263,6 +1280,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
 function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
   tools: TOOLS,
   retrievalAuditCollector?: ReturnType<typeof createRetrievalAuditCollector>,
+  localTraceToolCalls?: LocalTraceToolCall[],
 ): TOOLS {
   return Object.fromEntries(
     Object.entries(tools).map(([toolName, tool]) => {
@@ -1278,6 +1296,11 @@ function withTraceLogging<TOOLS extends Record<string, ToolWithExecute>>(
         ) {
           const excerptPacket = buildExcerptPacket(args[0], result, toolName);
           const summary = traceRetrieval(toolName, args[0], result);
+
+          localTraceToolCalls?.push({
+            toolName,
+            input: sanitizeTraceValue(args[0]),
+          });
 
           if (retrievalAuditCollector) {
             retrievalAuditCollector.recordToolResult(
@@ -1467,6 +1490,9 @@ export async function POST(request: Request) {
     latestUserMessage ? getUiMessageText(latestUserMessage) : "",
   );
   const canonicalEvidenceCollector = createCanonicalEvidenceCollector();
+  const localTraceToolCalls: LocalTraceToolCall[] = [];
+  let localTraceUsage: LocalTraceUsage | null = null;
+  let localTraceObservedCost: RawLocalAnswerTrace["observedCost"] | null = null;
   const runtimeState: RouteRuntimeState = {
     latestUserText: latestUserMessage
       ? normalizeWhitespace(getUiMessageText(latestUserMessage))
@@ -1542,6 +1568,7 @@ export async function POST(request: Request) {
         canonicalEvidenceCollector,
       ),
       retrievalAuditCollector,
+      localTraceToolCalls,
     );
     const availableToolNames = new Set(Object.keys(chatTools));
 
@@ -1734,7 +1761,15 @@ ${summaryText}`;
         );
       },
       onFinish: async (event) => {
-        retrievalAuditCollector.setUsageFields(mapUsageAndCost(event));
+        const usageCostFields = mapUsageAndCost(event);
+
+        retrievalAuditCollector.setUsageFields(usageCostFields);
+        localTraceUsage = mapLocalTraceUsage(event, usageCostFields);
+        localTraceObservedCost = getObservedCostForTrace({
+          usageCostFields,
+          usage: localTraceUsage,
+          calculatedAt: new Date().toISOString(),
+        });
         console.log(
           `[chat] observability historyIncluded=${runtimeState.priorHistoryIncluded}` +
             ` evidenceBefore=${runtimeState.evidenceItemsBeforeDedupe}` +
@@ -1756,6 +1791,25 @@ ${summaryText}`;
         onFinish: async ({ responseMessage }) => {
           const responseText = getUiMessageText(responseMessage);
           console.log(`[TRACE] FINAL_ANSWER:\n${responseText}`);
+          let validationResult: RawLocalAnswerTracePayload["validation"] = {
+            status: "skipped",
+            reason: "validation_not_run",
+          };
+
+          try {
+            const answerValidationResult: AnswerValidationLogResult =
+              getAnswerValidationLogResult({
+                enabled: isAnswerValidationLoggingEnabled(),
+                userQuery: runtimeState.latestUserText,
+                candidateAnswer: responseText,
+                canonicalEvidenceItems: canonicalEvidenceCollector.items(),
+              });
+
+            validationResult = answerValidationResult;
+            logAnswerValidationResult({ result: answerValidationResult });
+          } catch (error) {
+            console.error("[chat] answer-validation:error", error);
+          }
 
           if (normalizeWhitespace(responseText).length === 0) {
             console.log("[chat] persist:assistant:skipped-empty");
@@ -1770,6 +1824,28 @@ ${summaryText}`;
             );
           } catch (error) {
             console.error("[chat] persist:assistant:error", error);
+          }
+
+          try {
+            const payload =
+              localTraceUsage && localTraceObservedCost
+                ? buildLocalAnswerTracePayload({
+                    selectedScope,
+                    userQuery: runtimeState.latestUserText,
+                    finalAnswer: responseText,
+                    canonicalEvidenceItems: canonicalEvidenceCollector.items(),
+                    validation: validationResult,
+                    usage: localTraceUsage,
+                    observedCost: localTraceObservedCost,
+                    toolCalls: localTraceToolCalls,
+                  })
+                : null;
+
+            await sendLocalAnswerTrace({
+              payload,
+            });
+          } catch (error) {
+            console.error("[chat] local-trace-capture:error", error);
           }
         },
         execute: async ({ writer }) => {

@@ -10,7 +10,8 @@ export type CandidateAnswerDefectType =
 
 export type CandidateAnswerPossibleDefectType =
   | "possible_unsupported_role_label"
-  | "likely_source_omission";
+  | "likely_source_omission"
+  | "possible_derived_explanation";
 
 export type CandidateAnswerObservationType =
   | "source_represented"
@@ -82,21 +83,24 @@ const DERIVED_VALUE_PATTERNS = [
   /[+\-*/×÷=]/,
   /\b(calculated|calculate|works out|equivalent to|therefore|total charge|would be|≈|approx)\b/i,
 ];
+const DERIVED_EXPLANATION_PATTERNS = [
+  /\btime[- ]and[- ]a[- ]half\b/i,
+];
 const PRECEDENCE_PATTERNS = [
   /\b(overrides?|supersedes?|takes precedence|instead of|rather than|subject to the main agreement|capped at .* under)\b/i,
 ];
 const ROLE_PATTERNS = [
-  /\bGeneral Artists\b/g,
-  /\bOther Artists\b/g,
-  /\bArtists\b/g,
-  /\bArtist\b/g,
-  /\bStunt Co-ordinators and Performers\b/g,
-  /\bStunt Coordinators and Stunt Performers\b/g,
-  /\bStunt Coordinators and Performers\b/g,
-  /\bStunt Co-ordinators\b/g,
-  /\bStunt Coordinators\b/g,
-  /\bStunt Performers\b/g,
-  /\bStunt Performer\b/g,
+  /\bGeneral Artists\b/gi,
+  /\bOther Artists\b/gi,
+  /\bStunt Co-ordinators and Performers\b/gi,
+  /\bStunt Coordinators and Stunt Performers\b/gi,
+  /\bStunt Coordinators and Performers\b/gi,
+  /\bStunt Co-ordinators\b/gi,
+  /\bStunt Coordinators\b/gi,
+  /\bStunt Performers\b/gi,
+  /\bStunt Performer\b/gi,
+  /\bArtists\b/gi,
+  /\bArtist\b/gi,
 ];
 
 function normalizeWhitespace(text: string) {
@@ -105,6 +109,10 @@ function normalizeWhitespace(text: string) {
 
 function normalizeText(text: string) {
   return normalizeWhitespace(text).toLowerCase();
+}
+
+function removePageCitations(text: string) {
+  return text.replace(/\b(?:p\.?|page|pages)\s+\d+(?:[–-]\d+)?\b/gi, "");
 }
 
 function uniqueValues<T>(values: T[], getKey: (value: T) => string) {
@@ -129,6 +137,12 @@ function getQueryTerms(query: string) {
   return normalizeText(query)
     .split(/[^a-z0-9£/]+/)
     .filter((term) => term.length > 2 && !STOP_WORDS.has(term));
+}
+
+function getDistinctiveQueryTerms(query: string) {
+  return getQueryTerms(query).filter(
+    (term) => !["contract", "public", "rate", "whats"].includes(term),
+  );
 }
 
 function sourceKey(source: EvidenceSourceRef) {
@@ -247,6 +261,15 @@ function normalizeRoleLabel(role: string) {
   return normalizedRole;
 }
 
+function isSupportedGeneralArtistContrastRole(role: string, evidenceRoleSet: Set<string>) {
+  const normalizedRole = normalizeRoleLabel(role);
+
+  return (
+    (normalizedRole === "general artist" || normalizedRole === "general artists") &&
+    (evidenceRoleSet.has("artist") || evidenceRoleSet.has("artists"))
+  );
+}
+
 function extractRoleLabels(text: string) {
   const roles: string[] = [];
 
@@ -307,15 +330,63 @@ function isProseBlockDirectlyRelevant(
   const sourceText = normalizeText(unit.sourceText);
   const queryAsksForRate = /\b(rate|how much|paid|pay|payment)\b/i.test(userQuery);
   const hasDirectRateLanguage =
-    /\b(rate|paid at|payable at|hourly payments|one third|one seventh)\b/i.test(
+    /\b(rate|paid at|payable at|hourly payments|one third|one half|one seventh)\b/i.test(
       unit.sourceText,
-    ) || /(?:£|\b\d+\/\d+)/.test(unit.sourceText);
+    ) || /(?:£|\b\d+\/\d+|\b50\s*%)/.test(unit.sourceText);
 
   if (queryAsksForRate && !hasDirectRateLanguage) {
     return false;
   }
 
-  return queryTerms.some((term) => sourceText.includes(term));
+  if (isNightRateQuery(userQuery) && !hasDirectNightWorkRateProposition(unit.sourceText)) {
+    return false;
+  }
+
+  const matchingTerms = queryTerms.filter((term) => sourceText.includes(term));
+
+  return matchingTerms.length >= Math.min(2, queryTerms.length);
+}
+
+function isNightRateQuery(userQuery: string) {
+  const normalizedQuery = normalizeText(userQuery);
+
+  return (
+    /\bnight\b/.test(normalizedQuery) &&
+    /\b(rate|how much|paid|pay|payment)\b/.test(normalizedQuery)
+  );
+}
+
+function hasDirectNightWorkRateProposition(text: string) {
+  const normalizedSource = normalizeText(text);
+  const hasNightWorkLabel =
+    /\bnight\s+work\b/i.test(text) ||
+    normalizedSource.includes("rendering services on night work");
+  const hasNightWorkPaymentTerm =
+    /\b(one half|1\/2|50\s*%)\b/i.test(text) ||
+    normalizedSource.includes("daily rate") ||
+    normalizedSource.includes("negotiated daily performance salary");
+
+  return hasNightWorkLabel && hasNightWorkPaymentTerm;
+}
+
+function isResidentLocationDefinitionQuery(userQuery: string) {
+  const normalizedQuery = normalizeText(userQuery);
+
+  return (
+    /\bresident\s+location\b/.test(normalizedQuery) &&
+    /\b(what|whats|what's|definition|define|meaning)\b/.test(normalizedQuery)
+  );
+}
+
+function isResidentLocationDefinitionUnit(unit: EvidenceUnit) {
+  const normalizedSource = normalizeText(unit.sourceText);
+
+  return (
+    unit.kind === "prose-block" &&
+    /"?resident location"?\s*[–-]/i.test(unit.sourceText) &&
+    normalizedSource.includes("daily travel to and from the base is not feasible") &&
+    normalizedSource.includes("overnight accommodation")
+  );
 }
 
 function isDirectlyRelevant(
@@ -323,6 +394,10 @@ function isDirectlyRelevant(
   queryTerms: string[],
   userQuery: string,
 ) {
+  if (isResidentLocationDefinitionQuery(userQuery)) {
+    return isResidentLocationDefinitionUnit(unit);
+  }
+
   return (
     isTableRowDirectlyRelevant(unit, queryTerms) ||
     isProseBlockDirectlyRelevant(unit, queryTerms, userQuery)
@@ -330,7 +405,7 @@ function isDirectlyRelevant(
 }
 
 function getRelevantSources(userQuery: string, evidenceUnits: EvidenceUnit[]) {
-  const queryTerms = getQueryTerms(userQuery);
+  const queryTerms = getDistinctiveQueryTerms(userQuery);
 
   if (queryTerms.length === 0) {
     return {
@@ -378,12 +453,6 @@ function answerRepresentsSource(answer: string, source: EvidenceSourceRef, units
   const sourceUnits = units.filter((unit) => sourceKey(getSource(unit)) === sourceKey(source));
 
   for (const unit of sourceUnits) {
-    for (const heading of [unit.section, ...unit.headingPath]) {
-      if (heading && normalizedAnswer.includes(normalizeText(heading))) {
-        return true;
-      }
-    }
-
     const compactSource = normalizeText(unit.sourceText);
     const sourcePhrases = compactSource
       .split(/[.;:\n|]+/)
@@ -393,9 +462,108 @@ function answerRepresentsSource(answer: string, source: EvidenceSourceRef, units
     if (sourcePhrases.some((phrase) => normalizedAnswer.includes(phrase))) {
       return true;
     }
+
+    if (unitRepresentedByAnswer(answer, unit)) {
+      return true;
+    }
   }
 
   return false;
+}
+
+function getCellValue(unit: EvidenceUnit, headerPattern: RegExp) {
+  return unit.metadata.cells?.find((cell) => headerPattern.test(cell.header))?.value ?? null;
+}
+
+function normalizedValueInAnswer(answer: string, value: string | null) {
+  if (value == null) {
+    return false;
+  }
+
+  const normalizedValue = normalizeText(value);
+
+  return normalizedValue.length > 0 && normalizeText(answer).includes(normalizedValue);
+}
+
+function unitRepresentedByAnswer(answer: string, unit: EvidenceUnit) {
+  const normalizedAnswer = normalizeText(answer);
+  const normalizedSource = normalizeText(unit.sourceText);
+  const topic = getCellValue(unit, /\b(topic|item|provision|clause)\b/i);
+  const rate = getCellValue(unit, /\b(rate|value)\b/i);
+  const notes = getCellValue(unit, /\b(notes?|description)\b/i);
+  const sourceReference = getCellValue(unit, /\b(source|reference|agreement ref)\b/i);
+  const representedTableValues = [topic, rate, notes, sourceReference].filter((value) =>
+    normalizedValueInAnswer(answer, value),
+  ).length;
+  const hasOvertimeSummarySignature =
+    unit.kind === "table-row" &&
+    normalizedSource.includes("overtime") &&
+    normalizedSource.includes("1/7 daily/hr") &&
+    normalizedAnswer.includes("overtime") &&
+    /(?:1\/7(?:th)?|one seventh)/i.test(answer) &&
+    /daily(?:\/|\s+per\s+)?hr|daily\s+per\s+hour/i.test(answer);
+  const hasNightSummarySignature =
+    unit.kind === "table-row" &&
+    normalizedSource.includes("night work") &&
+    normalizedSource.includes("see agreement") &&
+    normalizedAnswer.includes("night") &&
+    normalizedAnswer.includes("agreement");
+  const hasAgreementOvertimeSignature =
+    normalizedSource.includes("one third the daily performance salary") &&
+    normalizedSource.includes("£88") &&
+    /(?:one third|1\/3)/i.test(answer) &&
+    normalizedAnswer.includes("daily performance salary") &&
+    normalizedAnswer.includes("£88");
+  const hasAgreementF151Signature =
+    normalizedSource.includes("clause f15 overtime and premium payments") &&
+    normalizedSource.includes("one third") &&
+    normalizedSource.includes("£88") &&
+    /clause\s+f15\.1/i.test(answer) &&
+    (/(?:one third|1\/3)/i.test(answer) || normalizedAnswer.includes("£88"));
+  const hasAgreementF156NightSignature =
+    normalizedSource.includes("night work") &&
+    normalizedSource.includes("one half") &&
+    normalizedSource.includes("negotiated daily performance salary") &&
+    normalizedAnswer.includes("night") &&
+    /clause\s+f15\.6\s*\(?i\)?/i.test(answer) &&
+    /(?:one half|1\/2)/i.test(answer) &&
+    normalizedAnswer.includes("negotiated daily performance salary");
+  const hasAgreementNightRateSignature =
+    normalizedSource.includes("night work") &&
+    normalizedSource.includes("additional sum equal to one half") &&
+    normalizedSource.includes("negotiated daily performance salary") &&
+    normalizedAnswer.includes("night") &&
+    normalizedAnswer.includes("one half") &&
+    normalizedAnswer.includes("negotiated daily performance salary");
+  const hasAppendixFbNightRateSignature =
+    normalizedSource.includes("one half their daily rate for night work") &&
+    normalizedAnswer.includes("stunt") &&
+    normalizedAnswer.includes("night work") &&
+    normalizedAnswer.includes("one half") &&
+    normalizedAnswer.includes("daily rate");
+  const hasResidentLocationDefinitionSignature =
+    isResidentLocationDefinitionUnit(unit) &&
+    normalizedAnswer.includes("resident location") &&
+    normalizedAnswer.includes("daily travel to and from the base is not feasible") &&
+    normalizedAnswer.includes("overnight accommodation");
+  const hasDeclaredHolidayEasterSignature =
+    normalizedSource.includes("declared holidays") &&
+    normalizedSource.includes("easter sunday") &&
+    normalizedAnswer.includes("easter sunday") &&
+    normalizedAnswer.includes("declared holidays");
+
+  return (
+    representedTableValues >= 2 ||
+    hasOvertimeSummarySignature ||
+    hasNightSummarySignature ||
+    hasAgreementOvertimeSignature ||
+    hasAgreementF151Signature ||
+    hasAgreementF156NightSignature ||
+    hasAgreementNightRateSignature ||
+    hasAppendixFbNightRateSignature ||
+    hasResidentLocationDefinitionSignature ||
+    hasDeclaredHolidayEasterSignature
+  );
 }
 
 function sourceRepresentedByParaphrase(
@@ -408,12 +576,7 @@ function sourceRepresentedByParaphrase(
 
   for (const unit of sourceUnits) {
     const normalizedSource = normalizeText(unit.sourceText);
-    const hasAgreementOvertimeSignature =
-      normalizedSource.includes("one third the daily performance salary") &&
-      normalizedSource.includes("£88") &&
-      normalizedAnswer.includes("one third") &&
-      normalizedAnswer.includes("daily performance salary") &&
-      normalizedAnswer.includes("£88");
+    const hasAgreementOvertimeSignature = unitRepresentedByAnswer(answer, unit);
     const hasClauseReference =
       /clause\s+f\d+(?:\.\d+)?/i.test(answer) &&
       (unit.headingPath.some((heading) =>
@@ -459,6 +622,14 @@ function sourceDirectEvidenceRepresented(args: {
   source: EvidenceSourceRef;
   directUnits: EvidenceUnit[];
 }) {
+  if (
+    args.directUnits
+      .filter((unit) => sourceKey(getSource(unit)) === sourceKey(args.source))
+      .some((unit) => unitRepresentedByAnswer(args.answer, unit))
+  ) {
+    return true;
+  }
+
   const answerNumberSet = new Set(
     extractNumberTokens(args.answer).map((token) => token.normalized),
   );
@@ -532,7 +703,7 @@ export function validateCandidateAnswer(args: {
     (source) => !representedSourceKeys.has(sourceKey(source)),
   );
   const uncertainSources = relevance.uncertain;
-  const answerNumbers = extractNumberTokens(candidateAnswer);
+  const answerNumbers = extractNumberTokens(removePageCitations(candidateAnswer));
   const evidenceNumbers = uniqueValues(
     evidenceUnits.flatMap((unit) => extractNumberTokens(unit.sourceText)),
     (token) => token.normalized,
@@ -563,11 +734,31 @@ export function validateCandidateAnswer(args: {
     });
   }
 
+  for (const pattern of DERIVED_EXPLANATION_PATTERNS) {
+    const match = candidateAnswer.match(pattern);
+
+    if (
+      match &&
+      !evidenceUnits.some((unit) => pattern.test(unit.sourceText)) &&
+      evidenceUnits.some(
+        (unit) => /\bdaily\s*\+\s*50%/i.test(unit.sourceText),
+      )
+    ) {
+      possibleDefects.push({
+        type: "possible_derived_explanation",
+        message:
+          "The answer uses explanatory derived wording that is not present in the evidence.",
+        value: match[0],
+      });
+    }
+  }
+
   for (const role of answerRoles) {
     const normalizedRole = normalizeRoleLabel(role);
 
     if (
       !evidenceRoleSet.has(normalizedRole) &&
+      !isSupportedGeneralArtistContrastRole(role, evidenceRoleSet) &&
       !evidenceUnits.some((unit) =>
         normalizeText(unit.sourceText).includes(normalizedRole),
       )
@@ -602,7 +793,11 @@ export function validateCandidateAnswer(args: {
   definiteDefects.push(...validateCitations(candidateAnswer, evidenceSources));
 
   for (const source of evidenceSources) {
-    if (representedSourceKeys.has(sourceKey(source))) {
+    if (
+      representedSources.some(
+        (representedSource) => sourceKey(representedSource) === sourceKey(source),
+      )
+    ) {
       neutralObservations.push({
         type: "source_represented",
         message: "The answer represents this evidence source.",
@@ -649,7 +844,10 @@ export function validateCandidateAnswer(args: {
   }
 
   for (const source of uncertainSources) {
-    if (directRelevantSourceKeys.has(sourceKey(source))) {
+    if (
+      directRelevantSourceKeys.has(sourceKey(source)) ||
+      representedSourceKeys.has(sourceKey(source))
+    ) {
       continue;
     }
 

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { CanonicalEvidenceItem } from "./canonical-evidence";
 import {
   parseMarkdownTablesFromPactCinemaSummary,
@@ -29,7 +28,14 @@ function normalizeWhitespace(text: string) {
 }
 
 function stableHash(parts: string[]) {
-  return createHash("sha256").update(parts.join("::")).digest("hex").slice(0, 16);
+  let hash = 2166136261;
+
+  for (const char of parts.join("::")) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function getCanonicalEvidenceId(item: CanonicalEvidenceItem) {
