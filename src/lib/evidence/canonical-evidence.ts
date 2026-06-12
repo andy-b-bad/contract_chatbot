@@ -21,10 +21,13 @@ export type CanonicalEvidenceCollector = {
 };
 
 type ParsedPageIndexJson = {
+  doc_name?: unknown;
+  document_name?: unknown;
   content?: unknown[];
   docs?: unknown[];
   pages?: unknown;
   requested_pages?: unknown;
+  returned_pages?: unknown;
   shared_summary_pages?: unknown;
 };
 
@@ -99,6 +102,26 @@ function getRequestedPagesFromInput(input: unknown) {
   return getRequestedPagesValue(input.pages);
 }
 
+function getDocumentNameFromInput(input: unknown) {
+  if (typeof input !== "object" || input === null) {
+    return null;
+  }
+
+  if ("doc_name" in input) {
+    return getString(input.doc_name);
+  }
+
+  if ("docName" in input) {
+    return getString(input.docName);
+  }
+
+  if ("name" in input) {
+    return getString(input.name);
+  }
+
+  return null;
+}
+
 function getParsedItems(json: ParsedPageIndexJson | unknown[]) {
   if (Array.isArray(json)) {
     return json;
@@ -122,18 +145,28 @@ function getTopLevelRequestedPages(json: ParsedPageIndexJson | unknown[]) {
 
   return (
     getRequestedPagesValue(json.requested_pages) ??
+    getRequestedPagesValue(json.returned_pages) ??
     getRequestedPagesValue(json.pages) ??
     getRequestedPagesValue(json.shared_summary_pages)
   );
+}
+
+function getTopLevelDocumentName(json: ParsedPageIndexJson | unknown[]) {
+  if (Array.isArray(json)) {
+    return null;
+  }
+
+  return getString(json.doc_name) ?? getString(json.document_name);
 }
 
 function getCanonicalEvidenceItem(args: {
   scope: ContractScope;
   toolName: "get_page_content";
   item: unknown;
+  fallbackDocumentName: string | null;
   requestedPages: string | null;
 }) {
-  const { scope, toolName, item, requestedPages } = args;
+  const { scope, toolName, item, fallbackDocumentName, requestedPages } = args;
 
   if (typeof item !== "object" || item === null) {
     return null;
@@ -142,7 +175,8 @@ function getCanonicalEvidenceItem(args: {
   const documentName =
     getString("document_name" in item ? item.document_name : undefined) ??
     getString("doc_name" in item ? item.doc_name : undefined) ??
-    getString("name" in item ? item.name : undefined);
+    getString("name" in item ? item.name : undefined) ??
+    fallbackDocumentName;
   const rawText =
     getString("raw_text" in item ? item.raw_text : undefined) ??
     getString("text" in item ? item.text : undefined) ??
@@ -197,6 +231,8 @@ export function createCanonicalEvidenceCollector(): CanonicalEvidenceCollector {
 
       const requestedPages =
         getTopLevelRequestedPages(parsed) ?? getRequestedPagesFromInput(toolInput);
+      const fallbackDocumentName =
+        getTopLevelDocumentName(parsed) ?? getDocumentNameFromInput(toolInput);
       const parsedItems = getParsedItems(parsed);
 
       for (const parsedItem of parsedItems) {
@@ -204,6 +240,7 @@ export function createCanonicalEvidenceCollector(): CanonicalEvidenceCollector {
           scope,
           toolName,
           item: parsedItem,
+          fallbackDocumentName,
           requestedPages,
         });
 

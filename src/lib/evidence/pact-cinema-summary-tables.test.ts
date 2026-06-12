@@ -30,14 +30,16 @@ function evidence(rawText = pactCinemaSummaryPage.content[0].content) {
 }
 
 function primaryAgreementEvidence() {
-  return pactCinemaPrimaryAgreementPages.content.map((item) => ({
+  const pageIndexPayload = JSON.parse(pactCinemaPrimaryAgreementPages.content[0].text);
+
+  return pageIndexPayload.content.map((item: { page: number; text: string }) => ({
     scope: "pact-cinema",
     toolName: "get_page_content",
-    documentName: item.name,
-    pageRef: item.page_ref,
-    pageNumber: item.page_number,
-    requestedPages: "20-22",
-    rawText: item.content,
+    documentName: pageIndexPayload.doc_name,
+    pageRef: String(item.page),
+    pageNumber: item.page,
+    requestedPages: pageIndexPayload.returned_pages,
+    rawText: item.text,
   })) satisfies CanonicalEvidenceItem[];
 }
 

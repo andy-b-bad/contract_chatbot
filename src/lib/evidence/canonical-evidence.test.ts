@@ -121,8 +121,12 @@ test("preserves requested pages from top-level PageIndex response", () => {
   collector.recordPageContentResult({
     scope: "pact-cinema",
     toolName: "get_page_content",
-    toolInput: { pages: "1" },
-    toolResult: toolResult(pactCinemaPrimaryAgreementPages),
+    toolInput: {
+      doc_name:
+        "Pact-Equity-Cinema-Films-Agreement-2021-effective-from-6th-April-2021.pdf",
+      pages: "1",
+    },
+    toolResult: pactCinemaPrimaryAgreementPages,
   });
 
   assert.deepEqual(
@@ -133,8 +137,10 @@ test("preserves requested pages from top-level PageIndex response", () => {
 
 test("preserves requested pages from tool input fallback", () => {
   const collector = createCanonicalEvidenceCollector();
+  const pageIndexPayload = JSON.parse(pactCinemaPrimaryAgreementPages.content[0].text);
   const withoutTopLevelPages = {
-    content: pactCinemaPrimaryAgreementPages.content,
+    doc_name: pageIndexPayload.doc_name,
+    content: pageIndexPayload.content,
   };
 
   collector.recordPageContentResult({
