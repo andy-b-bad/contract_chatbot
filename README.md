@@ -35,7 +35,8 @@ npm run dev
 Open `http://localhost:3000`.
 
 - When `ENABLE_AUTH=false`, the app behaves like the original anonymous chat UI.
-- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where Supabase email magic-link sign-in is used to create a session.
+- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where Google OAuth is the primary sign-in method and email/password sign-in is available as a fallback.
+- Email/password account creation remains enabled through Supabase email confirmation.
 
 ## Validation
 Before submitting changes, run:
@@ -48,10 +49,13 @@ npm run build
 Manual checks:
 
 - confirm `/` does not redirect and `/api/chat` remains anonymous when `ENABLE_AUTH=false`
-- confirm `/login` and magic-link auth only matter when `ENABLE_AUTH=true`
+- confirm `/login` and auth gating only matter when `ENABLE_AUTH=true`
 - confirm `/` redirects to `/login` and `/api/chat` returns `401` when signed out and `ENABLE_AUTH=true`
 - confirm `/api/health/supabase` reports connectivity and authenticated table access
 - confirm chat history survives a page refresh after sending messages
+- confirm Google OAuth returns through `/auth/callback` and lands on `/`
+- confirm email/password sign-in lands on `/` directly
+- confirm email/password signup requires email confirmation and the confirmation link returns through `/auth/callback`
 
 ## Structure
 Relevant paths:
@@ -59,7 +63,7 @@ Relevant paths:
 - `src/app/chat-client.tsx`: authenticated client chat UI
 - `src/app/page.tsx`: server page that either renders anonymous chat or loads the current user's persisted chat
 - `src/app/api/chat/route.ts`: PageIndex-grounded chat route with optional auth and persistence wrapping
-- `src/app/login/page.tsx`: Supabase email sign-in
+- `src/app/login/page.tsx`: Supabase login surface
 - `src/lib/chat-persistence.ts`: single-thread chat persistence helpers
 - `src/lib/retrieval-audit.ts`: bounded retrieval audit collection for persisted observability records
 - `src/lib/audit/excerpt-packet.ts`: shapes bounded excerpt packets from filtered tool results
@@ -72,6 +76,7 @@ Relevant paths:
 - Retrieval observability persists bounded audit metadata including usage, estimated cost, and excerpt packets when auth is enabled.
 - The live answer path still depends on PageIndex MCP and DeepSeek only.
 - Auth and persistence stay dormant until `ENABLE_AUTH=true`.
+- The checked-in `supabase/config.toml` still reflects local defaults and is not the source of truth for the already-configured hosted Google provider or production email-confirmation settings.
 
 ## Local Trace Capture
 Local raw answer traces are disabled unless `ENABLE_LOCAL_TRACE_CAPTURE=true`,

@@ -13,7 +13,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     <LoginForm
       initialError={
         error === "auth_callback"
-          ? "Authentication failed. Request a new sign-in link."
+          ? "Authentication failed. Try again."
           : null
       }
     />

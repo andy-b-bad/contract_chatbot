@@ -37,7 +37,7 @@ The UI uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`, posting 
 Supabase is used only for authentication, session cookies, per-user thread resolution, chat persistence, retrieval audit persistence, and diagnostic/admin data. It is not a retrieval source. This integration is inactive by default and only becomes active when `ENABLE_AUTH=true`.
 
 - `proxy.ts` refreshes the Supabase session and redirects unauthenticated users only when `ENABLE_AUTH=true`
-- `src/app/login/page.tsx` starts an email magic-link flow
+- `src/app/login/page.tsx` starts Google OAuth or email/password auth
 - `src/app/auth/callback/route.ts` exchanges the Supabase auth code for a session
 - `src/lib/chat-session.ts` resolves the authenticated user, resolves or validates the current thread, and orchestrates user-turn and assistant-turn persistence
 - `src/lib/chat-persistence.ts` performs low-level reads and writes for `chat_threads`, `chat_messages`, `retrieval_audits`, and `retrieval_audit_sources`
@@ -90,17 +90,18 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 ## Request Lifecycle
 1. When `ENABLE_AUTH=true`, `proxy.ts` refreshes the Supabase session for `/` and redirects unauthenticated requests to `/login`.
 2. `src/app/page.tsx` either renders the original anonymous chat flow or, when auth is enabled, loads the user's single persisted chat thread and messages from Supabase before rendering `src/app/chat-client.tsx`.
-3. The user selects a contract scope and submits a message in the client UI.
-4. The browser sends the full message list plus `selectedScope` and, when auth is enabled, `chatId` to `POST /api/chat`.
-5. `src/lib/chat-session.ts` resolves the authenticated user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.
-6. The route normalizes scope, filters prior messages by scope, builds the system prompt, and persists the latest user message through `src/lib/chat-session.ts` when auth is enabled.
-7. The route loads PageIndex MCP tools, wraps them so out-of-scope documents are rejected and shared summary page access is constrained, and attaches trace logging plus retrieval-audit collection.
-8. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path.
-9. Tool activity is mirrored into transient `retrievalStatus` data parts so the client can display “Retrieving contract content...”.
-10. Retrieval trace data is logged to the console and also accumulated as bounded audit metadata during tool execution. During wrapped tool execution, bounded excerpt packets are derived from filtered tool results and added to the in-memory audit collector.
-11. The final assistant text is streamed back to the page.
-12. In `streamText.onFinish`, usage and estimated-cost fields are captured from the model event and added to the in-memory audit collector.
-13. After the response completes, the assistant message is persisted and, when auth is enabled, a linked `retrieval_audits` row is written for that answer, followed by an optional `retrieval_audit_sources` row when bounded excerpt packets were captured.
+3. The login page starts Google OAuth through Supabase or performs email/password sign-in directly; email/password signup sends a confirmation email that returns through `src/app/auth/callback/route.ts`.
+4. The user selects a contract scope and submits a message in the client UI.
+5. The browser sends the full message list plus `selectedScope` and, when auth is enabled, `chatId` to `POST /api/chat`.
+6. `src/lib/chat-session.ts` resolves the authenticated user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.
+7. The route normalizes scope, filters prior messages by scope, builds the system prompt, and persists the latest user message through `src/lib/chat-session.ts` when auth is enabled.
+8. The route loads PageIndex MCP tools, wraps them so out-of-scope documents are rejected and shared summary page access is constrained, and attaches trace logging plus retrieval-audit collection.
+9. `streamText` calls DeepSeek through the AI SDK. The first model step is forced to use tools, which makes retrieval the default path.
+10. Tool activity is mirrored into transient `retrievalStatus` data parts so the client can display “Retrieving contract content...”.
+11. Retrieval trace data is logged to the console and also accumulated as bounded audit metadata during tool execution. During wrapped tool execution, bounded excerpt packets are derived from filtered tool results and added to the in-memory audit collector.
+12. The final assistant text is streamed back to the page.
+13. In `streamText.onFinish`, usage and estimated-cost fields are captured from the model event and added to the in-memory audit collector.
+14. After the response completes, the assistant message is persisted and, when auth is enabled, a linked `retrieval_audits` row is written for that answer, followed by an optional `retrieval_audit_sources` row when bounded excerpt packets were captured.
 
 ## Retrieval Guardrails
 The main protection against hallucination is not the UI; it is the server wrapper around model/tool access.
