@@ -37,7 +37,7 @@ The UI uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`, posting 
 Supabase is used only for authentication, session cookies, per-user thread resolution, chat persistence, retrieval audit persistence, and diagnostic/admin data. It is not a retrieval source. This integration is inactive by default and only becomes active when `ENABLE_AUTH=true`.
 
 - `proxy.ts` refreshes the Supabase session and redirects unauthenticated users only when `ENABLE_AUTH=true`
-- `src/app/login/page.tsx` starts Google OAuth or email/password auth
+- `src/app/login/page.tsx` starts Google OAuth auth
 - `src/app/auth/callback/route.ts` exchanges the Supabase auth code for a session
 - `src/lib/chat-session.ts` resolves the authenticated user, resolves or validates the current thread, and orchestrates user-turn and assistant-turn persistence
 - `src/lib/chat-persistence.ts` performs low-level reads and writes for `chat_threads`, `chat_messages`, `retrieval_audits`, and `retrieval_audit_sources`
@@ -90,7 +90,7 @@ The route remains the HTTP and streaming orchestration entrypoint. It does not d
 ## Request Lifecycle
 1. When `ENABLE_AUTH=true`, `proxy.ts` refreshes the Supabase session for `/` and redirects unauthenticated requests to `/login`.
 2. `src/app/page.tsx` either renders the original anonymous chat flow or, when auth is enabled, loads the user's single persisted chat thread and messages from Supabase before rendering `src/app/chat-client.tsx`.
-3. The login page starts Google OAuth through Supabase or performs email/password sign-in directly; email/password signup sends a confirmation email that returns through `src/app/auth/callback/route.ts`.
+3. The login page starts Google OAuth through Supabase; authenticated access currently uses Google OAuth only.
 4. The user selects a contract scope and submits a message in the client UI.
 5. The browser sends the full message list plus `selectedScope` and, when auth is enabled, `chatId` to `POST /api/chat`.
 6. `src/lib/chat-session.ts` resolves the authenticated user context when auth is enabled, creates or validates the thread, and returns `401` or `403` if the session or thread ownership check fails.

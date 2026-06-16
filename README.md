@@ -35,8 +35,7 @@ npm run dev
 Open `http://localhost:3000`.
 
 - When `ENABLE_AUTH=false`, the app behaves like the original anonymous chat UI.
-- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where Google OAuth is the primary sign-in method and email/password sign-in is available as a fallback.
-- Email/password account creation remains enabled through Supabase email confirmation.
+- When `ENABLE_AUTH=true`, unauthenticated users are redirected to `/login`, where authenticated access currently uses Google OAuth only.
 
 ## Validation
 Before submitting changes, run:
@@ -54,8 +53,6 @@ Manual checks:
 - confirm `/api/health/supabase` reports connectivity and authenticated table access
 - confirm chat history survives a page refresh after sending messages
 - confirm Google OAuth returns through `/auth/callback` and lands on `/`
-- confirm email/password sign-in lands on `/` directly
-- confirm email/password signup requires email confirmation and the confirmation link returns through `/auth/callback`
 
 ## Structure
 Relevant paths:
@@ -76,7 +73,7 @@ Relevant paths:
 - Retrieval observability persists bounded audit metadata including usage, estimated cost, and excerpt packets when auth is enabled.
 - The live answer path still depends on PageIndex MCP and DeepSeek only.
 - Auth and persistence stay dormant until `ENABLE_AUTH=true`.
-- The checked-in `supabase/config.toml` still reflects local defaults and is not the source of truth for the already-configured hosted Google provider or production email-confirmation settings.
+- The checked-in `supabase/config.toml` still reflects local defaults and is not the source of truth for the already-configured hosted Google provider.
 
 ## Local Trace Capture
 Local raw answer traces are disabled unless `ENABLE_LOCAL_TRACE_CAPTURE=true`,
