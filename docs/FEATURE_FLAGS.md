@@ -22,7 +22,7 @@ All enabling checks in current code are exact string comparisons to `"true"`. An
    - `proxy.ts` starts refreshing Supabase session cookies and redirects signed-out requests from `/` to `/login` in [`proxy()`](/home/ccod/repos/bsr-contract-chatbot/proxy.ts:9)
    - `/api/chat` resolves the caller through Supabase, returns `401` when signed out, and binds chat access to the authenticated user's thread in [`resolveChatSession()`](/home/ccod/repos/bsr-contract-chatbot/src/lib/chat-session.ts:50) and [`POST`](/home/ccod/repos/bsr-contract-chatbot/src/app/api/chat/route.ts:1469)
    - user and assistant messages, plus retrieval audit metadata, are persisted for the authenticated user in [`persistUserTurnIfNeeded()`](/home/ccod/repos/bsr-contract-chatbot/src/lib/chat-session.ts:112) and [`persistAssistantTurnWithAuditIfNeeded()`](/home/ccod/repos/bsr-contract-chatbot/src/lib/chat-session.ts:128)
-   - `/login` becomes the Supabase email magic-link sign-in page via [`LoginForm`](/home/ccod/repos/bsr-contract-chatbot/src/app/login/login-form.tsx:10) and [`/auth/callback`](/home/ccod/repos/bsr-contract-chatbot/src/app/auth/callback/route.ts:4)
+   - `/login` starts Google OAuth through Supabase via [`LoginForm`](/home/ccod/repos/bsr-contract-chatbot/src/app/login/login-form.tsx:10), and [`/auth/callback`](/home/ccod/repos/bsr-contract-chatbot/src/app/auth/callback/route.ts:4) exchanges the returned auth code for a session
 5. What enabling does not change:
    - it does not change retrieval scope enforcement or document grounding; those stay server-owned in `/api/chat`
    - it does not turn Vercel deployment protection on or off; Vercel protection is external platform access control, not app authentication
@@ -41,7 +41,7 @@ All enabling checks in current code are exact string comparisons to `"true"`. An
 9. Security or operational warnings:
    - this is application auth, not network perimeter protection
    - enabling it without valid Supabase configuration will break auth-dependent paths at runtime
-   - current signed-in flow is Supabase email magic-link auth; the login page remains reachable, but anonymous use of the main chat does not remain available
+   - current visible sign-in flow is Supabase Google OAuth; the login page remains reachable, but anonymous use of the main chat does not remain available
 10. Exact source files/symbols that read it:
    - [`src/lib/supabase/config.ts` `ENABLE_AUTH`, `isAuthEnabled()`](/home/ccod/repos/bsr-contract-chatbot/src/lib/supabase/config.ts:5)
    - [`src/app/page.tsx` `Home`](/home/ccod/repos/bsr-contract-chatbot/src/app/page.tsx:9)
