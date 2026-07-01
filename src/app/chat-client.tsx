@@ -3,6 +3,7 @@
 import { DefaultChatTransport, jsonSchema } from "ai";
 import { useChat } from "@ai-sdk/react";
 import { useRouter } from "next/navigation";
+import type { ReactNode } from "react";
 import { useState } from "react";
 import {
   CONTRACT_SCOPE_OPTIONS,
@@ -26,6 +27,44 @@ const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
   },
   required: ["active", "label"],
 });
+
+function renderTextWithBoldMarkdown(text: string) {
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+
+  while (cursor < text.length) {
+    const start = text.indexOf("**", cursor);
+
+    if (start === -1) {
+      nodes.push(text.slice(cursor));
+      break;
+    }
+
+    const end = text.indexOf("**", start + 2);
+
+    if (end === -1) {
+      nodes.push(text.slice(cursor));
+      break;
+    }
+
+    if (end === start + 2) {
+      nodes.push(text.slice(cursor, end + 2));
+      cursor = end + 2;
+      continue;
+    }
+
+    if (start > cursor) {
+      nodes.push(text.slice(cursor, start));
+    }
+
+    nodes.push(<b key={`bold-${key}`}>{text.slice(start + 2, end)}</b>);
+    key += 1;
+    cursor = end + 2;
+  }
+
+  return nodes;
+}
 
 type ChatClientProps = {
   authEnabled: boolean;
@@ -299,7 +338,9 @@ export function ChatClient({
                           : "bg-zinc-100 text-zinc-900"
                       }`}
                     >
-                      {text}
+                      {message.role === "assistant"
+                        ? renderTextWithBoldMarkdown(text)
+                        : text}
                     </div>
                     {showRatingControls ? (
                       <div className="mt-2 flex flex-wrap gap-2 px-1">
