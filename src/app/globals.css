@@ -1,26 +1,32 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f5f4f2;
+  --foreground: #1a1a1a;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-brandred: #a6192e;
+  --color-brandred-hover: #8a1522;
+  --color-brandred-tint: #fbeef0;
+  --color-ink: #1a1a1a;
+  --color-page: #f5f4f2;
+  --color-card: #ffffff;
+  --color-line: #e2e0db;
+  --color-linestrong: #dcd8d2;
+  --color-secondary: #5b5b58;
+  --color-tertiary: #7a7a76;
+  --color-successc: #2e7d4f;
+  --color-warningc: #f2c230;
+  --font-sans: var(--font-geist-sans), Inter, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: var(--font-geist-mono), "IBM Plex Mono", Menlo, monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
 }

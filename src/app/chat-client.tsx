@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import {
   CONTRACT_SCOPE_OPTIONS,
+  getContractScopeOption,
   type ContractScope,
 } from "./contracts";
 import {
@@ -142,6 +143,7 @@ export function ChatClient({
   const pendingAssistantLabel =
     retrievalStatus?.label ??
     (status === "submitted" ? "Preparing response..." : null);
+  const selectedScopeLabel = getContractScopeOption(selectedScope).label;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -237,178 +239,208 @@ export function ChatClient({
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8 sm:px-6">
-      <header
-        className={
-          authEnabled
-            ? "flex flex-wrap items-start justify-between gap-4"
-            : "space-y-2"
-        }
-      >
-        <div className="space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            BSR Contract Chatbot
-          </h1>
-          <p className="text-sm text-zinc-600">
-            Contract-Scoped Retrieval-Augmented Chat Interface: Clause-Level
-            Contract Intelligence for Stunt Performers in Film & TV
-          </p>
-        </div>
-
-        {authEnabled ? (
-          <div className="flex items-center gap-3">
-            {userEmail ? (
-              <p className="text-sm text-zinc-500">{userEmail}</p>
-            ) : null}
-            <button
-              type="button"
-              onClick={handleSignOut}
-              disabled={isSigningOut}
-              className="rounded-full border border-zinc-300 px-3 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isSigningOut ? "Signing out..." : "Sign out"}
-            </button>
+    <>
+      <div className="h-[3px] bg-brandred" />
+      <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-6 py-10">
+        <header className="mb-8 flex items-start justify-between gap-6">
+          <div>
+            <p className="mb-2.5 text-[11px] font-semibold tracking-[0.2em] text-brandred uppercase">
+              Equity
+            </p>
+            <h1 className="mb-1.5 font-serif text-[27px] font-semibold tracking-tight text-ink">
+              Contract chatbot
+            </h1>
+            <p className="max-w-md text-[13px] leading-relaxed text-secondary">
+              Clause-level contract intelligence for Equity members
+            </p>
           </div>
-        ) : null}
-      </header>
 
-      <section className="space-y-2">
-        <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase">
-          Choose your contract
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {CONTRACT_SCOPE_OPTIONS.map((scope) => {
-            const isSelected = scope.id === selectedScope;
-
-            return (
+          {authEnabled ? (
+            <div className="flex shrink-0 flex-col items-end gap-2.5 pt-1">
+              {userEmail ? (
+                <p className="max-w-[220px] truncate text-[12px] text-secondary">
+                  {userEmail}
+                </p>
+              ) : null}
               <button
-                key={scope.id}
                 type="button"
-                aria-pressed={isSelected}
-                disabled={isLoading}
-                onClick={() => setSelectedScope(scope.id)}
-                className={`rounded-full border px-3 py-2 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
-                  isSelected
-                    ? "border-zinc-900 bg-zinc-900 text-white"
-                    : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-500"
-                }`}
+                onClick={handleSignOut}
+                disabled={isSigningOut}
+                className="rounded-full border border-line px-3.5 py-1.5 text-[12px] text-ink transition-colors hover:border-linestrong hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {scope.label}
+                {isSigningOut ? "Signing out..." : "Sign out"}
               </button>
-            );
-          })}
-        </div>
-      </section>
+            </div>
+          ) : null}
+        </header>
 
-      <section className="flex-1 space-y-4 rounded-2xl border border-zinc-200 bg-white p-4">
-        {messages.length === 0 && pendingAssistantLabel === null ? (
-          <p className="text-sm text-zinc-500">No messages yet.</p>
-        ) : (
-          <>
-            {messages.map((message) => {
-              const text = getChatMessageText(message);
-              const showRatingControls =
-                authEnabled &&
-                Boolean(initialChatId) &&
-                message.role === "assistant" &&
-                message.metadata?.hasPersistedAudit === true;
-              const selectedUserRating = message.metadata?.userRating ?? null;
-              const isRatingMessage = ratingMessageId === message.id;
+        <div className="mb-2.5 h-[4px] w-full bg-brandred" />
 
-              if (text.length === 0) {
-                return null;
-              }
+        <section className="mb-9">
+          <p className="mb-3 text-[10.5px] tracking-[0.16em] text-tertiary uppercase">
+            Choose your contract
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {CONTRACT_SCOPE_OPTIONS.map((scope) => {
+              const isSelected = scope.id === selectedScope;
 
               return (
-                <div
-                  key={message.id}
-                  className={`flex ${
-                    message.role === "user" ? "justify-end" : "justify-start"
+                <button
+                  key={scope.id}
+                  type="button"
+                  aria-pressed={isSelected}
+                  disabled={isLoading}
+                  onClick={() => setSelectedScope(scope.id)}
+                  className={`rounded-full border px-4 py-2 text-[12.5px] font-medium shadow-[0_1px_2px_rgba(26,26,26,0.04)] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                    isSelected
+                      ? "border-brandred bg-brandred text-white shadow-[0_1px_2px_rgba(166,25,46,0.35)] hover:bg-brandred-hover"
+                      : "border-line bg-white text-secondary hover:border-brandred/40 hover:text-ink"
                   }`}
                 >
-                  <div
-                    className={`flex max-w-[85%] flex-col ${
-                      message.role === "user" ? "items-end" : "items-start"
-                    }`}
-                  >
-                    <div
-                      className={`w-full rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
-                        message.role === "user"
-                          ? "bg-zinc-900 text-white"
-                          : "bg-zinc-100 text-zinc-900"
-                      }`}
-                    >
-                      {message.role === "assistant"
-                        ? renderTextWithBoldMarkdown(text)
-                        : text}
-                    </div>
-                    {showRatingControls ? (
-                      <div className="mt-2 flex flex-wrap gap-2 px-1">
-                        {([
-                          [1, "Not helpful"],
-                          [2, "Partly helpful"],
-                          [3, "Helpful"],
-                        ] as const).map(([ratingValue, ratingLabel]) => {
-                          const isSelected = selectedUserRating === ratingValue;
-
-                          return (
-                            <button
-                              key={ratingValue}
-                              type="button"
-                              disabled={isRatingMessage}
-                              onClick={() => handleRateMessage(message.id, ratingValue)}
-                              className={`rounded-full border px-3 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
-                                isSelected
-                                  ? "border-zinc-900 bg-zinc-900 text-white"
-                                  : "border-zinc-300 bg-white text-zinc-700 hover:border-zinc-500"
-                              }`}
-                            >
-                              {ratingValue} {ratingLabel}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+                  {scope.label}
+                </button>
               );
             })}
+          </div>
+        </section>
 
-            {pendingAssistantLabel ? (
-              <div className="flex justify-start">
-                <div className="max-w-[85%] rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-zinc-900">
-                  <div className="flex items-center gap-2">
-                    <span className="size-2 rounded-full bg-amber-500 animate-pulse" />
-                    <span>{pendingAssistantLabel}</span>
-                  </div>
-                </div>
+        <section className="flex-1 rounded-xl border border-line bg-card p-5 shadow-[0_1px_3px_rgba(26,26,26,0.05)] sm:p-8">
+          <div className="space-y-5">
+            {messages.length === 0 && pendingAssistantLabel === null ? (
+              <div className="rounded-2xl rounded-tl-sm bg-page px-4 py-3.5 text-[13.5px] text-secondary italic">
+                No messages yet.
               </div>
-            ) : null}
-          </>
-        )}
-      </section>
+            ) : (
+              <>
+                {messages.map((message) => {
+                  const text = getChatMessageText(message);
+                  const isUserMessage = message.role === "user";
+                  const showRatingControls =
+                    authEnabled &&
+                    Boolean(initialChatId) &&
+                    message.role === "assistant" &&
+                    message.metadata?.hasPersistedAudit === true;
+                  const selectedUserRating = message.metadata?.userRating ?? null;
+                  const isRatingMessage = ratingMessageId === message.id;
 
-      {authEnabled && authError ? (
-        <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {authError}
+                  if (text.length === 0) {
+                    return null;
+                  }
+
+                  return (
+                    <div key={message.id}>
+                      <div
+                        className={`flex items-start gap-2.5 ${
+                          isUserMessage ? "justify-end" : "justify-start"
+                        }`}
+                      >
+                        {!isUserMessage ? (
+                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred-tint text-[10px] font-bold text-brandred">
+                            Eq
+                          </div>
+                        ) : null}
+
+                        <div
+                          className={`max-w-[80%] rounded-2xl px-4 text-[13.5px] leading-relaxed whitespace-pre-wrap ${
+                            isUserMessage
+                              ? "rounded-tr-sm bg-ink py-2.5 text-page"
+                              : "rounded-tl-sm bg-page py-4 text-ink sm:px-5"
+                          }`}
+                        >
+                          {message.role === "assistant"
+                            ? renderTextWithBoldMarkdown(text)
+                            : text}
+                        </div>
+
+                        {isUserMessage ? (
+                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ink text-[10px] font-semibold text-page">
+                            You
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {showRatingControls ? (
+                        <div className="mt-2 flex flex-wrap gap-2 pl-[38px]">
+                          {([
+                            [1, "Not helpful"],
+                            [2, "Partly helpful"],
+                            [3, "Helpful"],
+                          ] as const).map(([ratingValue, ratingLabel]) => {
+                            const isSelected =
+                              selectedUserRating === ratingValue;
+
+                            return (
+                              <button
+                                key={ratingValue}
+                                type="button"
+                                disabled={isRatingMessage}
+                                onClick={() =>
+                                  handleRateMessage(message.id, ratingValue)
+                                }
+                                className={`rounded-full border px-3 py-1.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                                  isSelected
+                                    ? "border-brandred bg-brandred-tint font-medium text-brandred"
+                                    : "border-line text-secondary hover:border-linestrong"
+                                }`}
+                              >
+                                {ratingLabel}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+
+                {pendingAssistantLabel ? (
+                  <div className="flex items-start gap-2.5">
+                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred-tint text-[10px] font-bold text-brandred">
+                      Eq
+                    </div>
+                    <div className="max-w-[80%] rounded-2xl rounded-tl-sm bg-page px-4 py-3.5 text-[13.5px] text-secondary italic sm:px-5">
+                      <div className="flex items-center gap-2">
+                        <span className="size-2 animate-pulse rounded-full bg-brandred" />
+                        <span>{pendingAssistantLabel}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+
+          {authEnabled && authError ? (
+            <p className="mt-5 rounded-lg border border-brandred/25 bg-brandred-tint px-4 py-3 text-[13px] text-brandred">
+              {authError}
+            </p>
+          ) : null}
+
+          <form
+            onSubmit={handleSubmit}
+            className="mt-7 flex gap-2.5 border-t border-line pt-5"
+          >
+            <input
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder={`Ask about the ${selectedScopeLabel} agreement...`}
+              className="min-w-0 flex-1 rounded-lg border border-line bg-page px-4 py-3 text-[13.5px] outline-none transition-shadow placeholder:text-tertiary focus:border-brandred focus:ring-2 focus:ring-brandred/25"
+            />
+            <button
+              type="submit"
+              disabled={isLoading || input.trim().length === 0}
+              className="rounded-lg bg-brandred px-5 py-3 text-[13px] font-medium text-white transition-colors hover:bg-brandred-hover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isLoading ? "Sending..." : "Ask"}
+            </button>
+          </form>
+        </section>
+
+        <p className="mt-5 text-center text-[11px] text-tertiary">
+          Answers are generated from clause text in the selected agreement.
+          Always confirm against the source document.
         </p>
-      ) : null}
-
-      <form onSubmit={handleSubmit} className="flex gap-3">
-        <input
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="Send a message..."
-          className="flex-1 rounded-xl border border-zinc-300 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
-        />
-        <button
-          type="submit"
-          disabled={isLoading || input.trim().length === 0}
-          className="rounded-xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isLoading ? "Sending..." : "Send"}
-        </button>
-      </form>
-    </main>
+      </main>
+    </>
   );
 }
