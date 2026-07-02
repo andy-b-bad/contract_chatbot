@@ -67,6 +67,75 @@ function renderTextWithBoldMarkdown(text: string) {
   return nodes;
 }
 
+function AssistantAvatar() {
+  return (
+    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred-tint text-brandred">
+      <svg
+        aria-hidden="true"
+        className="h-[15px] w-[15px]"
+        viewBox="0 0 24 24"
+        fill="none"
+      >
+        <rect
+          x="5"
+          y="9"
+          width="14"
+          height="11"
+          rx="3"
+          stroke="currentColor"
+          strokeWidth="1.8"
+        />
+        <path
+          d="M12 9V5"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+        <circle cx="12" cy="3.5" r="1.5" fill="currentColor" />
+        <circle cx="9" cy="14" r="1.3" fill="currentColor" />
+        <circle cx="15" cy="14" r="1.3" fill="currentColor" />
+        <path
+          d="M9 17.5h6"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+        <path
+          d="M2 13v3M22 13v3"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      </svg>
+    </div>
+  );
+}
+
+function getUserInitials(userEmail: string | null) {
+  if (!userEmail) {
+    return "You";
+  }
+
+  const nameParts = userEmail
+    .split("@")[0]
+    .split(/[._-]+/)
+    .filter(Boolean);
+
+  if (nameParts.length >= 2) {
+    return `${nameParts[0][0]}${nameParts[nameParts.length - 1][0]}`.toUpperCase();
+  }
+
+  return userEmail.slice(0, 2).toUpperCase();
+}
+
+function UserAvatar({ userEmail }: { userEmail: string | null }) {
+  return (
+    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred text-[10px] font-semibold text-white">
+      {getUserInitials(userEmail)}
+    </div>
+  );
+}
+
 type ChatClientProps = {
   authEnabled: boolean;
   initialChatId: string | null;
@@ -245,13 +314,13 @@ export function ChatClient({
         <header className="mb-8 flex items-start justify-between gap-6">
           <div>
             <p className="mb-2.5 text-[11px] font-semibold tracking-[0.2em] text-brandred uppercase">
-              Equity
+              Equity doc chat
             </p>
             <h1 className="mb-1.5 font-serif text-[27px] font-semibold tracking-tight text-ink">
-              Contract chatbot
+              Contract Chatbot
             </h1>
             <p className="max-w-md text-[13px] leading-relaxed text-secondary">
-              Clause-level contract intelligence for Equity members
+              Clause-level contract intelligence for Equity members.
             </p>
           </div>
 
@@ -335,9 +404,7 @@ export function ChatClient({
                         }`}
                       >
                         {!isUserMessage ? (
-                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred-tint text-[10px] font-bold text-brandred">
-                            Eq
-                          </div>
+                          <AssistantAvatar />
                         ) : null}
 
                         <div
@@ -353,9 +420,7 @@ export function ChatClient({
                         </div>
 
                         {isUserMessage ? (
-                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ink text-[10px] font-semibold text-page">
-                            You
-                          </div>
+                          <UserAvatar userEmail={userEmail} />
                         ) : null}
                       </div>
 
@@ -379,8 +444,8 @@ export function ChatClient({
                                 }
                                 className={`rounded-full border px-3 py-1.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                                   isSelected
-                                    ? "border-brandred bg-brandred-tint font-medium text-brandred"
-                                    : "border-line text-secondary hover:border-linestrong"
+                                    ? "border-brandred bg-brandred-tint font-medium text-brandred hover:bg-brandred hover:text-white"
+                                    : "border-line text-secondary hover:border-brandred/40 hover:bg-white hover:text-ink"
                                 }`}
                               >
                                 {ratingLabel}
@@ -395,9 +460,7 @@ export function ChatClient({
 
                 {pendingAssistantLabel ? (
                   <div className="flex items-start gap-2.5">
-                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brandred-tint text-[10px] font-bold text-brandred">
-                      Eq
-                    </div>
+                    <AssistantAvatar />
                     <div className="max-w-[80%] rounded-2xl rounded-tl-sm bg-page px-4 py-3.5 text-[13.5px] text-secondary italic sm:px-5">
                       <div className="flex items-center gap-2">
                         <span className="size-2 animate-pulse rounded-full bg-brandred" />
