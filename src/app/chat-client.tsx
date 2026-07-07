@@ -29,6 +29,9 @@ const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
   required: ["active", "label"],
 });
 
+const PROTOTYPE_UNAVAILABLE_TOOLTIP =
+  "Not yet operational in prototype version.";
+
 function renderTextWithBoldMarkdown(text: string) {
   const nodes: ReactNode[] = [];
   let cursor = 0;
@@ -314,13 +317,22 @@ export function ChatClient({
         <header className="mb-8 flex items-start justify-between gap-6">
           <div>
             <p className="mb-2.5 text-[11px] font-semibold tracking-[0.2em] text-brandred uppercase">
-              Equity doc chat
+              PACT/ Equity doc chat
             </p>
             <h1 className="mb-1.5 font-serif text-[27px] font-semibold tracking-tight text-ink">
               Contract Chatbot
             </h1>
             <p className="max-w-md text-[13px] leading-relaxed text-secondary">
-              Clause-level contract intelligence for Equity members.
+              Clause-level contract intelligence for performance artists.
+              Questions? Check out the{" "}
+              <a
+                href="https://andyeadie.com/?ref=contract-chatbot"
+                target="_blank"
+                rel="noopener"
+                className="font-medium text-brandred underline underline-offset-2 transition-colors hover:text-brandred-hover"
+              >
+                FAQ
+              </a>
             </p>
           </div>
 
@@ -352,22 +364,29 @@ export function ChatClient({
           <div className="flex flex-wrap gap-2">
             {CONTRACT_SCOPE_OPTIONS.map((scope) => {
               const isSelected = scope.id === selectedScope;
+              const isPrototypeUnavailable = scope.id !== "pact-cinema";
 
               return (
-                <button
-                  key={scope.id}
-                  type="button"
-                  aria-pressed={isSelected}
-                  disabled={isLoading}
-                  onClick={() => setSelectedScope(scope.id)}
-                  className={`rounded-full border px-4 py-2 text-[12.5px] font-medium shadow-[0_1px_2px_rgba(26,26,26,0.04)] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
-                    isSelected
-                      ? "border-brandred bg-brandred text-white shadow-[0_1px_2px_rgba(166,25,46,0.35)] hover:bg-brandred-hover"
-                      : "border-line bg-white text-secondary hover:border-brandred/40 hover:text-ink"
-                  }`}
-                >
-                  {scope.label}
-                </button>
+                <span key={scope.id} className="group relative inline-flex">
+                  <button
+                    type="button"
+                    aria-pressed={isSelected}
+                    disabled={isLoading}
+                    onClick={() => setSelectedScope(scope.id)}
+                    className={`rounded-full border px-4 py-2 text-[12.5px] font-medium shadow-[0_1px_2px_rgba(26,26,26,0.04)] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                      isSelected
+                        ? "border-brandred bg-brandred text-white shadow-[0_1px_2px_rgba(166,25,46,0.35)] hover:bg-brandred-hover"
+                        : "border-line bg-white text-secondary hover:border-brandred/40 hover:text-ink"
+                    }`}
+                  >
+                    {scope.label}
+                  </button>
+                  {isPrototypeUnavailable ? (
+                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 w-max max-w-[220px] -translate-x-1/2 rounded-md bg-ink px-2.5 py-1.5 text-center text-[11px] leading-snug text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                      {PROTOTYPE_UNAVAILABLE_TOOLTIP}
+                    </span>
+                  ) : null}
+                </span>
               );
             })}
           </div>
