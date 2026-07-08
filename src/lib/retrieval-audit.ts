@@ -15,6 +15,7 @@ export type RetrievalAuditTraceData = {
 };
 
 type RetrievalAuditState = {
+  finalAnswer: string | null;
   toolNames: string[];
   documentNames: string[];
   pageRefs: string[];
@@ -76,6 +77,7 @@ export function createRetrievalAuditCollector(
     MAX_RETRIEVAL_AUDIT_QUERY_LENGTH,
   );
   const state: RetrievalAuditState = {
+    finalAnswer: null,
     toolNames: [],
     documentNames: [],
     pageRefs: [],
@@ -117,10 +119,14 @@ export function createRetrievalAuditCollector(
     setUsageFields(usageFields: UsageCostFields) {
       state.usage = usageFields;
     },
+    setFinalAnswer(finalAnswer: string) {
+      state.finalAnswer = finalAnswer;
+    },
     toRecord(): RetrievalAuditRecord {
       return {
         scope,
         normalizedUserQuery,
+        finalAnswer: state.finalAnswer,
         toolNames: [...state.toolNames],
         documentNames: [...state.documentNames],
         pageRefs: [...state.pageRefs],

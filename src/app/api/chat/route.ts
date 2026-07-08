@@ -1817,6 +1817,7 @@ ${summaryText}`;
           }
 
           try {
+            retrievalAuditCollector.setFinalAnswer(responseText);
             await persistAssistantTurnWithAuditIfNeeded(
               sessionContext,
               responseMessage,

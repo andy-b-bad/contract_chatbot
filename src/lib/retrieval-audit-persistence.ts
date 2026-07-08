@@ -14,6 +14,7 @@ type PersistedChatMessageRow = {
 export type RetrievalAuditRecord = {
   scope: ContractScope;
   normalizedUserQuery: string;
+  finalAnswer: string | null;
   toolNames: string[];
   documentNames: string[];
   pageRefs: string[];
@@ -38,6 +39,7 @@ export async function persistRetrievalAudit(
         user_id: userId,
         scope: auditRecord.scope,
         normalized_user_query: auditRecord.normalizedUserQuery,
+        final_answer: auditRecord.finalAnswer,
         tool_names: auditRecord.toolNames,
         document_names: auditRecord.documentNames,
         page_refs: auditRecord.pageRefs,
