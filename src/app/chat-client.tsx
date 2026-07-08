@@ -326,7 +326,7 @@ export function ChatClient({
               Clause-level contract intelligence for performance artists.
               Questions? Check out the{" "}
               <a
-                href="https://andyeadie.com/?ref=contract-chatbot"
+                href="https://andyeadie.com/#faq"
                 target="_blank"
                 rel="noopener"
                 className="font-medium text-brandred underline underline-offset-2 transition-colors hover:text-brandred-hover"
