@@ -15,7 +15,9 @@ import {
 import {
   getExactScopeDocumentPolicy,
   getContractScopeOption,
+  getScopedSummaryDocumentPolicy,
   getSharedSummaryPageRange,
+  getSummaryOnlyScopeDocumentPolicy,
   isDocumentAllowedForScope,
   isPrimaryAgreementPageSelectionAllowed,
   isSharedSummaryPageSelectionAllowed,
@@ -278,6 +280,16 @@ function truncateForPacket(value: string, maxLength: number) {
 }
 
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
+  const summaryOnlyPolicy = getSummaryOnlyScopeDocumentPolicy(selectedScope);
+
+  if (summaryOnlyPolicy) {
+    return `${BASE_SYSTEM_PROMPT}
+
+For ${getContractScopeOption(selectedScope).label}, the only permitted document is exactly:
+- ${summaryOnlyPolicy.sharedSummary.name} (page ${summaryOnlyPolicy.sharedSummary.pages} only)
+This scope has no separate agreement document. Never request, mention, or rely on any other filename or page for this scope.`;
+  }
+
   const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
 
   if (exactPolicy) {
@@ -317,7 +329,7 @@ function getPrimaryAgreementDocumentId(selectedScope: ContractScope) {
 
 function getScopedSummaryDocumentId(selectedScope: ContractScope) {
   return (
-    getExactScopeDocumentPolicy(selectedScope)?.sharedSummary.id ??
+    getScopedSummaryDocumentPolicy(selectedScope)?.id ??
     SCOPED_SUMMARY_DOCUMENT_IDS[selectedScope] ??
     null
   );
@@ -1253,8 +1265,13 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
 
             const docName = getRequestedDocumentName(args[0]);
             const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+            const summaryOnlyPolicy =
+              getSummaryOnlyScopeDocumentPolicy(selectedScope);
 
-            if (exactPolicy && typeof docName !== "string") {
+            if (
+              (exactPolicy || summaryOnlyPolicy) &&
+              typeof docName !== "string"
+            ) {
               return createOutOfScopeToolResult(
                 toolName,
                 "(missing document name)",
@@ -1702,7 +1719,7 @@ export async function POST(request: Request) {
 
     if (availableToolNames.has("get_page_content")) {
       const summaryTool = chatTools.get_page_content;
-      const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+      const scopedSummaryPolicy = getScopedSummaryDocumentPolicy(selectedScope);
       const summaryInput =
         selectedScope === "pact-cinema"
           ? {
@@ -1710,11 +1727,11 @@ export async function POST(request: Request) {
               doc_id: "pi-cmoa82pdy000001qtxhbkqkk3",
               pages: "1",
             }
-          : exactPolicy
+          : scopedSummaryPolicy
             ? {
-                doc_name: exactPolicy.sharedSummary.name,
-                doc_id: exactPolicy.sharedSummary.id,
-                pages: exactPolicy.sharedSummary.pages,
+                doc_name: scopedSummaryPolicy.name,
+                doc_id: scopedSummaryPolicy.id,
+                pages: scopedSummaryPolicy.pages,
               }
             : null;
 

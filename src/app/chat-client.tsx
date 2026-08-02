@@ -221,7 +221,7 @@ export function ChatClient({
     (message) => getChatMessageScope(message) === selectedScope,
   );
   const isPrototypeUnavailable =
-    selectedScope !== "pact-cinema" && selectedScope !== "pact-tv-svod";
+    selectedScope === "bbc-tv" || selectedScope === "itv-tv";
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

@@ -26,6 +26,14 @@ export type ExactScopeDocumentPolicy = {
   };
 };
 
+export type SummaryOnlyScopeDocumentPolicy = {
+  sharedSummary: {
+    id: string;
+    name: string;
+    pages: string;
+  };
+};
+
 const SHARED_SUMMARY_PAGE_RANGES: Record<ContractScope, string> = {
   "pact-cinema": "3-5",
   "pact-tv-svod": "6-8",
@@ -48,6 +56,25 @@ const EXACT_SCOPE_DOCUMENT_POLICIES: Partial<
       id: "pi-cmnqadm3q033x01pgy2wmqioe",
       name: "Latest_rates_and_definitions_summary.pdf",
       pages: "6-8",
+    },
+  },
+};
+
+const SUMMARY_ONLY_SCOPE_DOCUMENT_POLICIES: Partial<
+  Record<ContractScope, SummaryOnlyScopeDocumentPolicy>
+> = {
+  commercial: {
+    sharedSummary: {
+      id: "pi-cmnqadm3q033x01pgy2wmqioe",
+      name: "Latest_rates_and_definitions_summary.pdf",
+      pages: "11",
+    },
+  },
+  mocap: {
+    sharedSummary: {
+      id: "pi-cmnqadm3q033x01pgy2wmqioe",
+      name: "Latest_rates_and_definitions_summary.pdf",
+      pages: "12",
     },
   },
 };
@@ -90,13 +117,13 @@ export const CONTRACT_SCOPE_OPTIONS = [
   },
   {
     id: "commercial",
-    label: "Commercial",
+    label: "Commercial (stunt performers)",
     searchHint: "Commercial",
     docNameHints: ["commercial"],
   },
   {
     id: "mocap",
-    label: "MoCap",
+    label: "MoCap (stunt performers)",
     searchHint: "MoCap motion capture",
     docNameHints: ["mocap", "motion-capture", "motion_capture", "motion capture"],
   },
@@ -198,11 +225,32 @@ export function isDocumentAllowedForScope(name: string, scope: ContractScope) {
     );
   }
 
+  const summaryOnlyPolicy = getSummaryOnlyScopeDocumentPolicy(scope);
+
+  if (summaryOnlyPolicy) {
+    return (
+      normalizeDocumentName(summaryOnlyPolicy.sharedSummary.name) ===
+      normalizeDocumentName(name)
+    );
+  }
+
   return isSharedSummaryDocumentName(name) || documentMatchesScope(name, scope);
 }
 
 export function getExactScopeDocumentPolicy(scope: ContractScope) {
   return EXACT_SCOPE_DOCUMENT_POLICIES[scope] ?? null;
+}
+
+export function getSummaryOnlyScopeDocumentPolicy(scope: ContractScope) {
+  return SUMMARY_ONLY_SCOPE_DOCUMENT_POLICIES[scope] ?? null;
+}
+
+export function getScopedSummaryDocumentPolicy(scope: ContractScope) {
+  return (
+    getSummaryOnlyScopeDocumentPolicy(scope)?.sharedSummary ??
+    getExactScopeDocumentPolicy(scope)?.sharedSummary ??
+    null
+  );
 }
 
 export function isPrimaryAgreementPageSelectionAllowed(

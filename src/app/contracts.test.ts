@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   getExactScopeDocumentPolicy,
+  getSummaryOnlyScopeDocumentPolicy,
   isDocumentAllowedForScope,
   isPrimaryAgreementPageSelectionAllowed,
   isSharedSummaryPageSelectionAllowed,
@@ -83,4 +84,42 @@ test("Pact TV summary access is bounded to pages 6 through 8", () => {
     isSharedSummaryPageSelectionAllowed("9", "pact-tv-svod"),
     false,
   );
+});
+
+test("Commercial and MoCap use only their shared-summary sections", () => {
+  assert.deepEqual(getSummaryOnlyScopeDocumentPolicy("commercial"), {
+    sharedSummary: {
+      id: "pi-cmnqadm3q033x01pgy2wmqioe",
+      name: SHARED_SUMMARY,
+      pages: "11",
+    },
+  });
+  assert.deepEqual(getSummaryOnlyScopeDocumentPolicy("mocap"), {
+    sharedSummary: {
+      id: "pi-cmnqadm3q033x01pgy2wmqioe",
+      name: SHARED_SUMMARY,
+      pages: "12",
+    },
+  });
+});
+
+test("Commercial and MoCap reject documents outside the shared summary", () => {
+  for (const scope of ["commercial", "mocap"] as const) {
+    assert.equal(isDocumentAllowedForScope(SHARED_SUMMARY, scope), true);
+    assert.equal(
+      isDocumentAllowedForScope(`${scope}-agreement.pdf`, scope),
+      false,
+    );
+    assert.equal(
+      isDocumentAllowedForScope("PACT_Cinema_Summary.pdf", scope),
+      false,
+    );
+  }
+});
+
+test("Commercial and MoCap summary access is bounded to pages 11 and 12", () => {
+  assert.equal(isSharedSummaryPageSelectionAllowed("11", "commercial"), true);
+  assert.equal(isSharedSummaryPageSelectionAllowed("12", "commercial"), false);
+  assert.equal(isSharedSummaryPageSelectionAllowed("12", "mocap"), true);
+  assert.equal(isSharedSummaryPageSelectionAllowed("11", "mocap"), false);
 });
