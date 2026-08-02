@@ -370,6 +370,10 @@ export function ChatClient({
           <div className="flex flex-wrap gap-2">
             {CONTRACT_SCOPE_OPTIONS.map((scope) => {
               const isSelected = scope.id === selectedScope;
+              const stuntPerformerSuffix = " (stunt performers)";
+              const hasStuntPerformerSuffix = scope.label.endsWith(
+                stuntPerformerSuffix,
+              );
 
               return (
                 <span key={scope.id} className="inline-flex">
@@ -384,7 +388,18 @@ export function ChatClient({
                         : "border-line bg-white text-secondary hover:border-brandred/40 hover:text-ink"
                     }`}
                   >
-                    {scope.label}
+                    {hasStuntPerformerSuffix ? (
+                      <span className="flex flex-col items-center leading-tight">
+                        <span className="whitespace-nowrap">
+                          {scope.label.slice(0, -stuntPerformerSuffix.length)}
+                        </span>
+                        <span className="whitespace-nowrap">
+                          {stuntPerformerSuffix.trim()}
+                        </span>
+                      </span>
+                    ) : (
+                      scope.label
+                    )}
                   </button>
                 </span>
               );
