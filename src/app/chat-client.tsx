@@ -13,6 +13,7 @@ import {
 import {
   type ChatMessage,
   type RetrievalStatus,
+  getChatMessageScope,
   getChatMessageText,
 } from "@/lib/chat";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
@@ -216,6 +217,9 @@ export function ChatClient({
     retrievalStatus?.label ??
     (status === "submitted" ? "Preparing response..." : null);
   const selectedScopeLabel = getContractScopeOption(selectedScope).label;
+  const scopedMessages = messages.filter(
+    (message) => getChatMessageScope(message) === selectedScope,
+  );
   const isPrototypeUnavailable =
     selectedScope !== "pact-cinema" && selectedScope !== "pact-tv-svod";
 
@@ -394,26 +398,35 @@ export function ChatClient({
               <p className="text-[15px] font-medium text-ink">
                 {PROTOTYPE_UNAVAILABLE_MESSAGE}
               </p>
-              <button
-                type="button"
-                onClick={() => setSelectedScope("pact-cinema")}
-                className="rounded-md border border-brandred bg-brandred px-5 py-3 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(166,25,46,0.25)] transition-colors hover:bg-brandred-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brandred"
-              >
-                Go back to PACT Cinema
-              </button>
+              <div className="flex flex-wrap justify-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedScope("pact-cinema")}
+                  className="rounded-md border border-brandred bg-brandred px-5 py-3 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(166,25,46,0.25)] transition-colors hover:bg-brandred-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brandred"
+                >
+                  Go back to PACT Cinema
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedScope("pact-tv-svod")}
+                  className="rounded-md border border-brandred bg-brandred px-5 py-3 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(166,25,46,0.25)] transition-colors hover:bg-brandred-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brandred"
+                >
+                  Go back to PACT TV &amp; SVoD
+                </button>
+              </div>
             </div>
           ) : null}
 
           <div
             className={`space-y-5 ${isPrototypeUnavailable ? "hidden" : ""}`}
           >
-            {messages.length === 0 && pendingAssistantLabel === null ? (
+            {scopedMessages.length === 0 && pendingAssistantLabel === null ? (
               <div className="rounded-2xl rounded-tl-sm bg-page px-4 py-3.5 text-[13.5px] text-secondary italic">
                 No messages yet.
               </div>
             ) : (
               <>
-                {messages.map((message) => {
+                {scopedMessages.map((message) => {
                   const text = getChatMessageText(message);
                   const isUserMessage = message.role === "user";
                   const showRatingControls =
