@@ -13,6 +13,19 @@ export type ContractScopeOption = {
   docNameHints: string[];
 };
 
+export type ExactScopeDocumentPolicy = {
+  primaryAgreement: {
+    id: string;
+    name: string;
+    pages: string;
+  };
+  sharedSummary: {
+    id: string;
+    name: string;
+    pages: string;
+  };
+};
+
 const SHARED_SUMMARY_PAGE_RANGES: Record<ContractScope, string> = {
   "pact-cinema": "3-5",
   "pact-tv-svod": "6-8",
@@ -20,6 +33,23 @@ const SHARED_SUMMARY_PAGE_RANGES: Record<ContractScope, string> = {
   "itv-tv": "9",
   commercial: "11",
   mocap: "12",
+};
+
+const EXACT_SCOPE_DOCUMENT_POLICIES: Partial<
+  Record<ContractScope, ExactScopeDocumentPolicy>
+> = {
+  "pact-tv-svod": {
+    primaryAgreement: {
+      id: "pi-cmnkrm3lp0f4n01qpfp3hksoe",
+      name: "pact-equity-tv-agreement-jan-2026-update.pdf",
+      pages: "1-88",
+    },
+    sharedSummary: {
+      id: "pi-cmnqadm3q033x01pgy2wmqioe",
+      name: "Latest_rates_and_definitions_summary.pdf",
+      pages: "6-8",
+    },
+  },
 };
 
 export const DEFAULT_CONTRACT_SCOPE: ContractScope = "pact-cinema";
@@ -155,7 +185,46 @@ export function documentMatchesScope(name: string, scope: ContractScope) {
 }
 
 export function isDocumentAllowedForScope(name: string, scope: ContractScope) {
+  const exactPolicy = getExactScopeDocumentPolicy(scope);
+
+  if (exactPolicy) {
+    const normalizedName = normalizeDocumentName(name);
+
+    return [
+      exactPolicy.primaryAgreement.name,
+      exactPolicy.sharedSummary.name,
+    ].some(
+      (allowedName) => normalizeDocumentName(allowedName) === normalizedName,
+    );
+  }
+
   return isSharedSummaryDocumentName(name) || documentMatchesScope(name, scope);
+}
+
+export function getExactScopeDocumentPolicy(scope: ContractScope) {
+  return EXACT_SCOPE_DOCUMENT_POLICIES[scope] ?? null;
+}
+
+export function isPrimaryAgreementPageSelectionAllowed(
+  pages: string,
+  scope: ContractScope,
+) {
+  const exactPolicy = getExactScopeDocumentPolicy(scope);
+
+  if (!exactPolicy) {
+    return true;
+  }
+
+  const allowedPages = expandPageSelection(exactPolicy.primaryAgreement.pages);
+  const requestedPages = expandPageSelection(pages);
+
+  if (!allowedPages || !requestedPages) {
+    return false;
+  }
+
+  const allowedPageSet = new Set(allowedPages);
+
+  return requestedPages.every((page) => allowedPageSet.has(page));
 }
 
 export function getSharedSummaryPageRange(scope: ContractScope) {

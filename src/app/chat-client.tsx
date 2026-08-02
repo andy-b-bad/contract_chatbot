@@ -216,7 +216,8 @@ export function ChatClient({
     retrievalStatus?.label ??
     (status === "submitted" ? "Preparing response..." : null);
   const selectedScopeLabel = getContractScopeOption(selectedScope).label;
-  const isPrototypeUnavailable = selectedScope !== "pact-cinema";
+  const isPrototypeUnavailable =
+    selectedScope !== "pact-cinema" && selectedScope !== "pact-tv-svod";
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

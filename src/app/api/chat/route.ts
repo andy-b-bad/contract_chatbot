@@ -13,9 +13,11 @@ import {
   type UIMessageStreamWriter,
 } from "ai";
 import {
+  getExactScopeDocumentPolicy,
   getContractScopeOption,
   getSharedSummaryPageRange,
   isDocumentAllowedForScope,
+  isPrimaryAgreementPageSelectionAllowed,
   isSharedSummaryPageSelectionAllowed,
   isSharedSummaryDocumentName,
   parseContractScope,
@@ -108,11 +110,14 @@ const SERVICE_UNAVAILABLE_RESPONSE =
   "I could not complete retrieval because the document or model service timed out. Please try again.";
 
 const BASE_SYSTEM_PROMPT = `You are a document-grounded assistant for a UK audience.
+FINAL RESPONSE REQUIREMENT: Return only the polished user-facing answer. Do not output analysis, drafting notes, self-instructions, plans, or statements about checking or presenting information. Silently remove any such text before responding.
 Answer only from the provided documents retrieved through the available tools and the latest user turn.
 Do not use general knowledge, assumptions, industry norms, or unstated interpretations.
 If exact wording is available, quote or closely cite it rather than broadening it
 Use PageIndex document structure before page content for contract lookup questions.
 Keep the final answer concise, precise, and document-bound.
+Answer only the question asked; do not add adjacent rates or provisions merely because they appear in the retrieved pages.
+For each material rule or rate, cite the source filename and page number, followed by the clause or appendix reference when one is available.
 Use all material evidence supplied in the system context and retrieved through tools.
 Where different terms apply to different categories of worker, role, or engagement, state each applicable rule and clearly label who it applies to. Do not silently omit a material category-specific rule.
 Do not claim that a general provision applies unchanged to a category when a category-specific rate or rule is also provided. Present the general provision and the category-specific provision separately, without attempting to reconcile or infer precedence unless the documents explicitly do so.
@@ -254,6 +259,7 @@ type RouteRuntimeState = {
   evidenceItemsBeforeDedupe: number;
   evidenceItemsAfterDedupe: number;
   evidenceChars: number;
+  primaryAgreementDocumentId: string | null;
   primaryAgreementDocumentName: string | null;
   primaryAgreementStructureRequested: boolean;
 };
@@ -269,6 +275,17 @@ function truncateForPacket(value: string, maxLength: number) {
 }
 
 function buildSystemPrompt(selectedScope: ContractScope, queryMode: QueryMode) {
+  const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+
+  if (exactPolicy) {
+    return `${BASE_SYSTEM_PROMPT}
+
+For ${getContractScopeOption(selectedScope).label}, the only permitted documents are exactly:
+- ${exactPolicy.primaryAgreement.name} (pages ${exactPolicy.primaryAgreement.pages})
+- ${exactPolicy.sharedSummary.name} (pages ${exactPolicy.sharedSummary.pages} only)
+Never request, mention, or rely on any other filename or page for this scope.`;
+  }
+
   if (selectedScope !== "pact-cinema") {
     return BASE_SYSTEM_PROMPT;
   }
@@ -282,11 +299,25 @@ Never request, mention, or rely on any other filename for this scope.`;
 }
 
 function getPrimaryAgreementDocumentName(selectedScope: ContractScope) {
-  return PRIMARY_AGREEMENT_DOCUMENTS[selectedScope] ?? null;
+  return (
+    getExactScopeDocumentPolicy(selectedScope)?.primaryAgreement.name ??
+    PRIMARY_AGREEMENT_DOCUMENTS[selectedScope] ??
+    null
+  );
+}
+
+function getPrimaryAgreementDocumentId(selectedScope: ContractScope) {
+  return (
+    getExactScopeDocumentPolicy(selectedScope)?.primaryAgreement.id ?? null
+  );
 }
 
 function getScopedSummaryDocumentId(selectedScope: ContractScope) {
-  return SCOPED_SUMMARY_DOCUMENT_IDS[selectedScope] ?? null;
+  return (
+    getExactScopeDocumentPolicy(selectedScope)?.sharedSummary.id ??
+    SCOPED_SUMMARY_DOCUMENT_IDS[selectedScope] ??
+    null
+  );
 }
 
 function createToolTextResult(payload: unknown) {
@@ -601,16 +632,23 @@ function withScopeSearchInput(input: unknown) {
 function withPrimaryAgreementDocumentInput(
   input: unknown,
   primaryAgreementDocumentName: string,
+  primaryAgreementDocumentId: string | null,
 ) {
   if (typeof input !== "object" || input === null) {
     return {
       doc_name: primaryAgreementDocumentName,
+      ...(primaryAgreementDocumentId
+        ? { doc_id: primaryAgreementDocumentId }
+        : {}),
     };
   }
 
   return {
     ...input,
     doc_name: primaryAgreementDocumentName,
+    ...(primaryAgreementDocumentId
+      ? { doc_id: primaryAgreementDocumentId }
+      : {}),
   };
 }
 
@@ -772,6 +810,25 @@ function createOutOfScopeToolResult(
     selected_scope: scopeOption.label,
     error: "The requested document is outside the selected contract scope.",
     allowed_documents: `Only ${scopeOption.label} documents and shared summary documents are allowed.`,
+  });
+}
+
+function createOutOfScopePageResult(
+  toolName: string,
+  docName: string,
+  pages: string,
+  selectedScope: ContractScope,
+) {
+  const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+
+  return createToolTextResult({
+    success: false,
+    tool: toolName,
+    doc_name: docName,
+    requested_pages: pages,
+    selected_scope: getContractScopeOption(selectedScope).label,
+    error: "The requested pages are outside the selected contract scope.",
+    allowed_pages: exactPolicy?.primaryAgreement.pages ?? null,
   });
 }
 
@@ -1183,6 +1240,7 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
               const scopedInput = withPrimaryAgreementDocumentInput(
                 args[0],
                 runtimeState.primaryAgreementDocumentName,
+                runtimeState.primaryAgreementDocumentId,
               );
 
               return tool.execute(
@@ -1191,12 +1249,78 @@ function withScopedRetrieval<TOOLS extends Record<string, ToolWithExecute>>(
             }
 
             const docName = getRequestedDocumentName(args[0]);
+            const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+
+            if (exactPolicy && typeof docName !== "string") {
+              return createOutOfScopeToolResult(
+                toolName,
+                "(missing document name)",
+                selectedScope,
+              );
+            }
 
             if (
               typeof docName === "string" &&
               !isDocumentAllowedForScope(docName, selectedScope)
             ) {
               return createOutOfScopeToolResult(toolName, docName, selectedScope);
+            }
+
+            const isPrimaryAgreement =
+              typeof docName === "string" &&
+              exactPolicy?.primaryAgreement.name.toLowerCase() ===
+                docName.trim().toLowerCase();
+
+            if (isPrimaryAgreement) {
+              const scopedInput = withPrimaryAgreementDocumentInput(
+                args[0],
+                exactPolicy.primaryAgreement.name,
+                exactPolicy.primaryAgreement.id,
+              );
+
+              if (toolName === "get_page_content") {
+                const requestedPages = getRequestedPages(scopedInput);
+
+                if (
+                  !requestedPages ||
+                  !isPrimaryAgreementPageSelectionAllowed(
+                    requestedPages,
+                    selectedScope,
+                  )
+                ) {
+                  return createOutOfScopePageResult(
+                    toolName,
+                    docName,
+                    requestedPages ?? "",
+                    selectedScope,
+                  );
+                }
+
+                const result = await tool.execute(
+                  ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+                );
+                runtimeState.pageContentFetchCount += 1;
+                canonicalEvidenceCollector.recordPageContentResult({
+                  scope: selectedScope,
+                  toolName,
+                  toolInput: scopedInput,
+                  toolResult: result,
+                });
+                const excerptPacket = buildExcerptPacket(
+                  scopedInput,
+                  result,
+                  toolName,
+                );
+                const evidenceSummary = buildCompactEvidenceItems(excerptPacket);
+
+                updateEvidenceObservability(runtimeState, evidenceSummary);
+
+                return result;
+              }
+
+              return tool.execute(
+                ...([scopedInput, ...args.slice(1)] as Parameters<typeof tool.execute>),
+              );
             }
 
             if (
@@ -1508,6 +1632,7 @@ export async function POST(request: Request) {
     evidenceItemsBeforeDedupe: 0,
     evidenceItemsAfterDedupe: 0,
     evidenceChars: 0,
+    primaryAgreementDocumentId: getPrimaryAgreementDocumentId(selectedScope),
     primaryAgreementDocumentName: getPrimaryAgreementDocumentName(selectedScope),
     primaryAgreementStructureRequested: false,
   };
@@ -1572,19 +1697,27 @@ export async function POST(request: Request) {
     );
     const availableToolNames = new Set(Object.keys(chatTools));
 
-    if (
-      selectedScope === "pact-cinema" &&
-      availableToolNames.has("get_page_content")
-    ) {
+    if (availableToolNames.has("get_page_content")) {
       const summaryTool = chatTools.get_page_content;
+      const exactPolicy = getExactScopeDocumentPolicy(selectedScope);
+      const summaryInput =
+        selectedScope === "pact-cinema"
+          ? {
+              doc_name: "PACT_Cinema_Summary.pdf",
+              doc_id: "pi-cmoa82pdy000001qtxhbkqkk3",
+              pages: "1",
+            }
+          : exactPolicy
+            ? {
+                doc_name: exactPolicy.sharedSummary.name,
+                doc_id: exactPolicy.sharedSummary.id,
+                pages: exactPolicy.sharedSummary.pages,
+              }
+            : null;
 
-      if (summaryTool?.execute) {
+      if (summaryTool?.execute && summaryInput) {
         const summaryResult = await summaryTool.execute(
-          {
-            doc_name: "PACT_Cinema_Summary.pdf",
-            doc_id: "pi-cmoa82pdy000001qtxhbkqkk3",
-            pages: "1",
-          },
+          summaryInput,
           {
             toolCallId: "pact-cinema-summary-preload",
             messages: modelMessages,
@@ -1596,11 +1729,15 @@ export async function POST(request: Request) {
         if (summaryText.trim()) {
           systemPrompt += `
 
-PACT Cinema stunt summary evidence:
+${getContractScopeOption(selectedScope).label} summary evidence:
 ${summaryText}`;
         }
       }
     }
+
+    systemPrompt += `
+
+FINAL OUTPUT CHECK: Respond with only the concise, polished answer for the user. Remove all analysis, plans, drafting notes, source-checking narration, and self-instructions before producing any text.`;
 
     const primaryAgreementPageTool =
       runtimeState.primaryAgreementDocumentName &&
