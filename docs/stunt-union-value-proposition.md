@@ -1,7 +1,7 @@
-# BSR Contract Chatbot
+# Contract Chatbot
 
 ## Value Proposition for a Stunt Union
-BSR Contract Chatbot is a contract-grounded assistant for stunt performers and union representatives. It helps users ask plain-English questions about rates, overtime, notice periods, holiday, travel, definitions, and obligations, then returns answers only from approved contract documents.
+Contract Chatbot is a contract-grounded assistant for stunt performers and union representatives. It helps users ask plain-English questions about rates, overtime, notice periods, holiday, travel, definitions, and obligations, then returns answers only from approved contract documents.
 
 This is the core value: faster access to contract intelligence without losing trust, accuracy, or scope control.
 

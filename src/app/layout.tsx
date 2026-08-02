@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BSR Contract Chatbot",
+  title: "Contract Chatbot",
   description: "Clause-level contract intelligence for Equity members",
 };
 
