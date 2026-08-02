@@ -29,8 +29,8 @@ const RETRIEVAL_STATUS_SCHEMA = jsonSchema<RetrievalStatus>({
   required: ["active", "label"],
 });
 
-const PROTOTYPE_UNAVAILABLE_TOOLTIP =
-  "Not yet operational in prototype version.";
+const PROTOTYPE_UNAVAILABLE_MESSAGE =
+  "Not yet operational in prototype version";
 
 function renderTextWithBoldMarkdown(text: string) {
   const nodes: ReactNode[] = [];
@@ -216,6 +216,7 @@ export function ChatClient({
     retrievalStatus?.label ??
     (status === "submitted" ? "Preparing response..." : null);
   const selectedScopeLabel = getContractScopeOption(selectedScope).label;
+  const isPrototypeUnavailable = selectedScope !== "pact-cinema";
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -364,10 +365,9 @@ export function ChatClient({
           <div className="flex flex-wrap gap-2">
             {CONTRACT_SCOPE_OPTIONS.map((scope) => {
               const isSelected = scope.id === selectedScope;
-              const isPrototypeUnavailable = scope.id !== "pact-cinema";
 
               return (
-                <span key={scope.id} className="group relative inline-flex">
+                <span key={scope.id} className="inline-flex">
                   <button
                     type="button"
                     aria-pressed={isSelected}
@@ -381,11 +381,6 @@ export function ChatClient({
                   >
                     {scope.label}
                   </button>
-                  {isPrototypeUnavailable ? (
-                    <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 w-max max-w-[220px] -translate-x-1/2 rounded-md bg-ink px-2.5 py-1.5 text-center text-[11px] leading-snug text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                      {PROTOTYPE_UNAVAILABLE_TOOLTIP}
-                    </span>
-                  ) : null}
                 </span>
               );
             })}
@@ -393,7 +388,24 @@ export function ChatClient({
         </section>
 
         <section className="flex-1 rounded-xl border border-line bg-card p-5 shadow-[0_1px_3px_rgba(26,26,26,0.05)] sm:p-8">
-          <div className="space-y-5">
+          {isPrototypeUnavailable ? (
+            <div className="flex min-h-56 flex-col items-center justify-center gap-5 text-center">
+              <p className="text-[15px] font-medium text-ink">
+                {PROTOTYPE_UNAVAILABLE_MESSAGE}
+              </p>
+              <button
+                type="button"
+                onClick={() => setSelectedScope("pact-cinema")}
+                className="rounded-md border border-brandred bg-brandred px-5 py-3 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(166,25,46,0.25)] transition-colors hover:bg-brandred-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brandred"
+              >
+                Go back to PACT Cinema
+              </button>
+            </div>
+          ) : null}
+
+          <div
+            className={`space-y-5 ${isPrototypeUnavailable ? "hidden" : ""}`}
+          >
             {messages.length === 0 && pendingAssistantLabel === null ? (
               <div className="rounded-2xl rounded-tl-sm bg-page px-4 py-3.5 text-[13.5px] text-secondary italic">
                 No messages yet.
@@ -492,30 +504,32 @@ export function ChatClient({
             )}
           </div>
 
-          {authEnabled && authError ? (
+          {!isPrototypeUnavailable && authEnabled && authError ? (
             <p className="mt-5 rounded-lg border border-brandred/25 bg-brandred-tint px-4 py-3 text-[13px] text-brandred">
               {authError}
             </p>
           ) : null}
 
-          <form
-            onSubmit={handleSubmit}
-            className="mt-7 flex gap-2.5 border-t border-line pt-5"
-          >
-            <input
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder={`Ask about the ${selectedScopeLabel} agreement...`}
-              className="min-w-0 flex-1 rounded-lg border border-line bg-page px-4 py-3 text-[13.5px] outline-none transition-shadow placeholder:text-tertiary focus:border-brandred focus:ring-2 focus:ring-brandred/25"
-            />
-            <button
-              type="submit"
-              disabled={isLoading || input.trim().length === 0}
-              className="rounded-lg bg-brandred px-5 py-3 text-[13px] font-medium text-white transition-colors hover:bg-brandred-hover disabled:cursor-not-allowed disabled:opacity-50"
+          {!isPrototypeUnavailable ? (
+            <form
+              onSubmit={handleSubmit}
+              className="mt-7 flex gap-2.5 border-t border-line pt-5"
             >
-              {isLoading ? "Sending..." : "Ask"}
-            </button>
-          </form>
+              <input
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder={`Ask about the ${selectedScopeLabel} agreement...`}
+                className="min-w-0 flex-1 rounded-lg border border-line bg-page px-4 py-3 text-[13.5px] outline-none transition-shadow placeholder:text-tertiary focus:border-brandred focus:ring-2 focus:ring-brandred/25"
+              />
+              <button
+                type="submit"
+                disabled={isLoading || input.trim().length === 0}
+                className="rounded-lg bg-brandred px-5 py-3 text-[13px] font-medium text-white transition-colors hover:bg-brandred-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isLoading ? "Sending..." : "Ask"}
+              </button>
+            </form>
+          ) : null}
         </section>
 
         <p className="mt-5 text-center text-[11px] text-tertiary">
